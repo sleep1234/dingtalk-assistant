@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.sky.xposed.rimet"
+    android:versionCode="103"
+    android:versionName="8.4">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="29"/>
+
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+
+    <application
+        android:label="RimetHook"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true">
+
+        <!-- 高德地图 Android key -->
+        <meta-data
+            android:name="com.amap.api.v2.apikey"
+            android:value="6528e2dca132967d339e407699815a8d"/>
+
+        <provider
+            android:name=".LocProvider"
+            android:authorities="com.sky.xposed.rimet.loc"
+            android:exported="true"
+            android:grantUriPermissions="true"/>
+
+        <activity
+            android:name=".SettingsActivity"
+            android:label="虚拟定位设置"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <meta-data android:name="xposedmodule" android:value="true"/>
+        <meta-data android:name="xposeddescription" android:value="RimetHook 钉钉虚拟定位+防撤回"/>
+        <meta-data android:name="xposedminversion" android:value="82"/>
+        <meta-data android:name="xposedscope" android:value="com.alibaba.android.rimet"/>
+        <meta-data android:name="xposedsharedprefs" android:value="location"/>
+    </application>
+</manifest>
