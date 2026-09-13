@@ -108,7 +108,8 @@ settings put system rimet_enabled 1        # 0 = 关闭虚拟定位
 aapt compile / p 输出 resources + AndroidManifest
 
 # 2. 按目标 API 级别编译（不同 API 级别的 android.jar 产物放 build/c33 ~ c46）
-javac -bootclasspath lib/android.jar \
+# 注意：必须加 -encoding UTF-8，否则 Windows 下中文注释会因 GBK 编码导致编译失败
+javac -encoding UTF-8 -bootclasspath lib/android.jar \
       -cp "lib/xposed-api-82.jar:lib/3dmap-7.0.0.jar:lib/map2d-6.0.0.jar:lib/search-9.7.1.jar" \
       -d build/cXX src/com/sky/xposed/rimet/*.java
 

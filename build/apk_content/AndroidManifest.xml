@@ -5,7 +5,7 @@
     android:versionName="8.0">
 
     <application
-        android:label="RimetHook"
+        android:label="钉钉助手-复活版"
         android:allowBackup="false">
         <meta-data
             android:name="xposedmodule"

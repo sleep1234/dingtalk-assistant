@@ -3,7 +3,6 @@ package com.sky.xposed.rimet;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.Context;
 import android.content.DialogInterface;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -12,7 +11,6 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.view.View;
@@ -20,7 +18,6 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.CompoundButton;
@@ -45,13 +42,17 @@ public class SettingsActivity extends Activity
         implements AMap.OnCameraChangeListener, AMap.OnMarkerDragListener {
 
     private static final String TAG = "RimetHook-Map";
+    // 高德地图 Android key（与 AndroidManifest.xml 中的 com.amap.api.v2.apikey 保持一致）
+    private static final String AMAP_KEY = "6528e2dca132967d339e407699815a8d";
 
     private MapView mMapView;
     private AMap mAMap;
-    private Marker mMarker;
+    private Marker mMarker;       // 红色：已保存的激活位置（不可拖动）
+    private Marker mDraggingMarker; // 蓝色：当前地图中心选点（可拖动）
     private TextView mTvInfo;
     private SharedPreferences mPrefs;
-    private LinearLayout mListLayout;
+    private android.widget.ListView mListView;
+    private android.widget.ArrayAdapter<String> mListAdapter;
 
     double mLat = 28.6557, mLng = 121.4200;
     String mAddr = "";
@@ -71,11 +72,13 @@ public class SettingsActivity extends Activity
 
         try {
             MapsInitializer.sdcardDir = getFilesDir().getAbsolutePath();
-            MapsInitializer.setApiKey("6528e2dca132967d339e407699815a8d");
+            // 高德 SDK 从 AndroidManifest.xml 的 <meta-data com.amap.api.v2.apikey> 读取 key，
+            // setApiKey 只是显式再确认一次（某些离线构建场景有用）
+            MapsInitializer.setApiKey(AMAP_KEY);
             MapsInitializer.initialize(this);
         } catch (Throwable t) { Log.e(TAG, "地图初始化失败", t); }
 
-        mPrefs = getSharedPreferences("location", MODE_PRIVATE);
+        mPrefs = getSharedPreferences("location", MODE_WORLD_READABLE);
         float glat = mPrefs.getFloat("lat_gcj", Float.NaN);
         float glng = mPrefs.getFloat("lng_gcj", Float.NaN);
         if (!Float.isNaN(glat) && !Float.isNaN(glng)) {
@@ -88,8 +91,8 @@ public class SettingsActivity extends Activity
 
         loadList();
 
-        // 整体 ScrollView
-        ScrollView scroll = new ScrollView(this);
+        // 整体纵向布局：标题 + 地图固定在上方，位置列表独立滚动
+        // （不再用 ScrollView 包住地图，避免列表项过多导致地图拖拽/缩放手势被拦截）
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
 
@@ -153,7 +156,7 @@ public class SettingsActivity extends Activity
         sw.setChecked(isSwitchOn());
         sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             public void onCheckedChanged(CompoundButton b, boolean on) {
-                setSwitchOn(on ? "1" : "0");
+                setSwitchOn(on);
                 toast("虚拟定位已" + (on ? "开启" : "关闭"));
             }
         });
@@ -167,16 +170,29 @@ public class SettingsActivity extends Activity
         tvList.setPadding(dpPx(12), dpPx(12), dpPx(12), dpPx(4));
         root.addView(tvList);
 
-        // 列表容器
-        mListLayout = new LinearLayout(this);
-        mListLayout.setOrientation(LinearLayout.VERTICAL);
-        mListLayout.setPadding(dpPx(12), 0, dpPx(12), 0);
-        root.addView(mListLayout);
+        // 列表容器（独立滚动的 ListView，不参与地图手势，避免拖拽/缩放冲突）
+        mListView = new android.widget.ListView(this);
+        mListView.setDivider(null);
+        mListAdapter = new android.widget.ArrayAdapter<String>(this, android.R.layout.simple_list_item_1);
+        mListView.setAdapter(mListAdapter);
+        mListView.setOnItemClickListener(new android.widget.AdapterView.OnItemClickListener() {
+            public void onItemClick(android.widget.AdapterView<?> parent, android.view.View view, int position, long id) {
+                switchTo(position);
+            }
+        });
+        mListView.setOnItemLongClickListener(new android.widget.AdapterView.OnItemLongClickListener() {
+            public boolean onItemLongClick(android.widget.AdapterView<?> parent, android.view.View view, int position, long id) {
+                confirmRemove(position);
+                return true;
+            }
+        });
+        // 让列表占满剩余空间并独立滚动
+        root.addView(mListView, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         refreshListView();
 
-        scroll.addView(root);
-        setContentView(scroll);
+        setContentView(root);
 
         // 地图
         mAMap = mMapView.getMap();
@@ -186,9 +202,15 @@ public class SettingsActivity extends Activity
         mAMap.setOnMapLoadedListener(new AMap.OnMapLoadedListener() {
             @Override
             public void onMapLoaded() {
+                // 红色标记：已保存的激活位置（不可拖动，标识当前生效坐标）
                 mMarker = mAMap.addMarker(new MarkerOptions()
                     .position(new LatLng(mLat, mLng))
                     .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
+                    .title("生效位置").draggable(false));
+                // 蓝色标记：当前地图中心选点（可拖动，显示要选的位置）
+                mDraggingMarker = mAMap.addMarker(new MarkerOptions()
+                    .position(new LatLng(mLat, mLng))
+                    .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))
                     .title("选点").draggable(true));
                 Log.i(TAG, "标记点已创建");
             }
@@ -203,19 +225,23 @@ public class SettingsActivity extends Activity
     @Override public void onCameraChangeFinish(CameraPosition pos) {
         LatLng t = pos.target;
         mLat = t.latitude; mLng = t.longitude;
-        if (mMarker != null) mMarker.setPosition(t);
+        // 地图拖动：移动蓝色选点标点到新中心（红色生效位置保持不变）
+        if (mDraggingMarker != null) mDraggingMarker.setPosition(t);
         else {
-            mMarker = mAMap.addMarker(new MarkerOptions()
-                .position(t).icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
+            mDraggingMarker = mAMap.addMarker(new MarkerOptions()
+                .position(t).icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))
                 .title("选点").draggable(true));
         }
         updateText();
     }
     @Override public void onMarkerDrag(Marker m) {}
     @Override public void onMarkerDragEnd(Marker m) {
-        LatLng p = m.getPosition();
-        mLat = p.latitude; mLng = p.longitude;
-        updateText();
+        // 只有蓝色选点标点可拖动
+        if (m == mDraggingMarker) {
+            LatLng p = m.getPosition();
+            mLat = p.latitude; mLng = p.longitude;
+            updateText();
+        }
     }
     @Override public void onMarkerDragStart(Marker m) {}
 
@@ -255,10 +281,17 @@ public class SettingsActivity extends Activity
 
     void moveMap(double gcjLat, double gcjLng) {
         mLat = gcjLat; mLng = gcjLng;
+        // 红色生效位置标记移动到新位置
         if (mMarker != null) mMarker.setPosition(new LatLng(gcjLat, gcjLng));
         else mMarker = mAMap.addMarker(new MarkerOptions()
             .position(new LatLng(gcjLat, gcjLng))
             .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED))
+            .title("生效位置").draggable(false));
+        // 蓝色选点标记也跟随到同一位置
+        if (mDraggingMarker != null) mDraggingMarker.setPosition(new LatLng(gcjLat, gcjLng));
+        else mDraggingMarker = mAMap.addMarker(new MarkerOptions()
+            .position(new LatLng(gcjLat, gcjLng))
+            .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))
             .title("选点").draggable(true));
         mAMap.animateCamera(CameraUpdateFactory.newLatLngZoom(new LatLng(gcjLat, gcjLng), 15));
         updateText();
@@ -288,28 +321,11 @@ public class SettingsActivity extends Activity
         b.show();
     }
 
-    /** 用 su(root) 写 Settings.System（钉钉 hook 端免权限读） */
-    boolean writeSettingsToSystem(double gcjLat, double gcjLng, double wgsLat, double wgsLng, String addr) {
-        try {
-            String cmd = "settings put system rimet_lat_gcj " + gcjLat
-                + " && settings put system rimet_lng_gcj " + gcjLng
-                + " && settings put system rimet_lat " + wgsLat
-                + " && settings put system rimet_lng " + wgsLng
-                + " && settings put system rimet_addr '" + (addr == null ? "" : addr.replace("'", "\\'")) + "'";
-            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
-            int rc = p.waitFor();
-            if (rc != 0) { toast("root 写入失败 (exit=" + rc + ")"); return false; }
-            return true;
-        } catch (Exception ex) {
-            toast("root 写入异常: " + ex.getMessage());
-            return false;
-        }
-    }
-
     void saveLocation(String name) {
         double[] wgs = gcj02ToWgs84(mLat, mLng);
 
-        // 写入当前激活坐标
+        // 写入 SharedPreferences —— LSPosed 的 xposedsharedprefs 会自动重定向到共享路径，
+        // 钉钉进程的 LocationHook 通过 XSharedPreferences 直接读到，无需 root。
         mPrefs.edit()
             .putFloat("lat", (float) wgs[0])
             .putFloat("lng", (float) wgs[1])
@@ -317,28 +333,34 @@ public class SettingsActivity extends Activity
             .putFloat("lng_gcj", (float) mLng)
             .putString("addr", name)
             .commit();
+        fixPrefsPermission();
 
         // 追加到位置列表
         addToList(name, mLat, mLng, wgs[0], wgs[1]);
 
-        // root 写 Settings.System
+        toast("已保存: " + name);
+        updateText();
+        refreshListView();
+    }
+
+    /**
+     * 关键：把 prefs 文件设为所有进程可读（0644）。
+     * LSPosed 重定向后的 prefs 文件默认是 660（仅模块 uid 可读），
+     * 钉钉进程（不同 uid）读不到。这里修复权限，让跨进程读取生效。
+     */
+    private void fixPrefsPermission() {
         try {
-            String cmd = "settings put system rimet_lat_gcj " + mLat
-                + " && settings put system rimet_lng_gcj " + mLng
-                + " && settings put system rimet_lat " + wgs[0]
-                + " && settings put system rimet_lng " + wgs[1]
-                + " && settings put system rimet_addr '" + name.replace("'", "\'") + "'";
-            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
-            int rc = p.waitFor();
-            if (rc != 0) toast("root 写入失败 (exit=" + rc + ")");
-            else {
-                toast("已保存: " + name);
-                updateText();
-                refreshListView();
+            java.io.File f = new java.io.File(
+                getApplicationInfo().dataDir + "/shared_prefs/location.xml");
+            if (f.exists()) {
+                f.setReadable(true, false);   // 所有进程可读
+                java.io.File parent = f.getParentFile();
+                if (parent != null) {
+                    parent.setReadable(true, false);
+                    parent.setExecutable(true, false);  // 目录需可遍历
+                }
             }
-        } catch (Exception ex) {
-            toast("root 写入异常: " + ex.getMessage());
-        }
+        } catch (Throwable ignored) {}
     }
 
     // ====== 位置列表管理 ======
@@ -382,65 +404,48 @@ public class SettingsActivity extends Activity
     }
 
     void refreshListView() {
-        mListLayout.removeAllViews();
-        for (int i = 0; i < mLocList.size(); i++) {
-            final LocItem it = mLocList.get(i);
-            final int idx = i;
-
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setPadding(0, dpPx(4), 0, dpPx(4));
-
-            TextView tv = new TextView(this);
-            tv.setText(it.addr + "  [" + String.format("%.4f,%.4f", it.lat, it.lng) + "]");
-            tv.setTextSize(13);
-            tv.setPadding(dpPx(8), dpPx(6), dpPx(8), dpPx(6));
-            tv.setBackgroundColor(0xFFEEEEEE);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            tv.setLayoutParams(lp);
-
-            // 点击 → 切换到该位置
-            tv.setOnClickListener(new View.OnClickListener() {
-                public void onClick(View v) {
-                    moveMap(it.lat, it.lng);
-                    mAddr = it.addr;
-                    updateText();
-                    // 切换后立即写 Settings.System，钉钉实时生效
-                    double[] wgs = gcj02ToWgs84(it.lat, it.lng);
-                    if (writeSettingsToSystem(it.lat, it.lng, wgs[0], wgs[1], it.addr)) {
-                        toast("已切换到: " + it.addr);
-                    }
-                }
-            });
-
-            // 长按 → 删除
-            tv.setOnLongClickListener(new View.OnLongClickListener() {
-                public boolean onLongClick(View v) {
-                    new AlertDialog.Builder(SettingsActivity.this)
-                        .setTitle("删除 " + it.addr + " ?")
-                        .setPositiveButton("删除", new DialogInterface.OnClickListener() {
-                            public void onClick(DialogInterface d, int w) {
-                                removeFromList(idx);
-                                refreshListView();
-                            }
-                        })
-                        .setNegativeButton("取消", null)
-                        .show();
-                    return true;
-                }
-            });
-
-            row.addView(tv);
-            mListLayout.addView(row);
+        java.util.List<String> labels = new java.util.ArrayList<>();
+        for (LocItem it : mLocList) {
+            labels.add(it.addr + "  [" + String.format("%.4f,%.4f", it.lat, it.lng) + "]");
         }
-        if (mLocList.isEmpty()) {
-            TextView empty = new TextView(this);
-            empty.setText("（暂无保存的位置）");
-            empty.setTextSize(12);
-            empty.setTextColor(0xFF888888);
-            empty.setPadding(dpPx(8), dpPx(6), 0, 0);
-            mListLayout.addView(empty);
-        }
+        mListAdapter.clear();
+        mListAdapter.addAll(labels);
+        mListAdapter.notifyDataSetChanged();
+    }
+
+    /** 点击位置列表切换 */
+    void switchTo(int idx) {
+        if (idx < 0 || idx >= mLocList.size()) return;
+        final LocItem it = mLocList.get(idx);
+        moveMap(it.lat, it.lng);
+        mAddr = it.addr;
+        // 写入激活坐标到 SharedPreferences（LSPosed 自动共享，钉钉实时生效）
+        double[] wgs = gcj02ToWgs84(it.lat, it.lng);
+        mPrefs.edit()
+            .putFloat("lat", (float) wgs[0])
+            .putFloat("lng", (float) wgs[1])
+            .putFloat("lat_gcj", (float) it.lat)
+            .putFloat("lng_gcj", (float) it.lng)
+            .putString("addr", it.addr)
+            .commit();
+        fixPrefsPermission();
+        updateText();
+        toast("已切换到: " + it.addr);
+    }
+
+    /** 长按删除确认 */
+    void confirmRemove(final int idx) {
+        if (idx < 0 || idx >= mLocList.size()) return;
+        new AlertDialog.Builder(SettingsActivity.this)
+            .setTitle("删除 " + mLocList.get(idx).addr + " ?")
+            .setPositiveButton("删除", new DialogInterface.OnClickListener() {
+                public void onClick(DialogInterface d, int w) {
+                    removeFromList(idx);
+                    refreshListView();
+                }
+            })
+            .setNegativeButton("取消", null)
+            .show();
     }
 
     void removeFromList(int idx) {
@@ -453,19 +458,23 @@ public class SettingsActivity extends Activity
 
     // ====== 开关 ======
     boolean isSwitchOn() {
+        // 从 SharedPreferences 读开关（LocationHook 同源读取）
         try {
-            String v = Settings.System.getString(getContentResolver(), "rimet_enabled");
-            return v == null || v.equals("1");  // 默认开
+            if (mPrefs.contains("enabled")) {
+                try {
+                    return mPrefs.getBoolean("enabled", true);
+                } catch (Throwable t) {
+                    String v = mPrefs.getString("enabled", "1");
+                    return !"0".equals(v) && !"false".equalsIgnoreCase(v);
+                }
+            }
         } catch (Throwable ignored) {}
-        return true;
+        return true;  // 默认开启
     }
-    void setSwitchOn(String v) {
-        try {
-            Runtime.getRuntime().exec(new String[]{"su", "-c", "settings put system rimet_enabled " + v}).waitFor();
-        } catch (Exception ignored) {}
-        try {
-            Settings.System.putString(getContentResolver(), "rimet_enabled", v);
-        } catch (Exception ignored) {}
+
+    void setSwitchOn(final boolean on) {
+        mPrefs.edit().putBoolean("enabled", on).commit();
+        fixPrefsPermission();
     }
 
     // ====== 坐标系转换 ======

@@ -1,21 +1,13 @@
 package com.sky.xposed.rimet;
 
-import android.location.Location;
-import android.os.Bundle;
-import android.util.Log;
-
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 
-import android.content.Context;
-import android.provider.Settings;
-import android.database.Cursor;
-import android.net.Uri;
+import android.util.Log;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.XSharedPreferences;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
  * 钉钉虚拟定位 Hook (v4)
@@ -29,22 +21,32 @@ public class LocationHook {
 
     private static final String TAG = "RimetHook-Location";
 
-    // 默认：台州市政府（椒江区）
+    // 默认：台州市政府（椒江区）GCJ-02
     private static final double DEFAULT_LAT = 28.6557;
     private static final double DEFAULT_LNG = 121.4200;
 
+    // 坐标读取 key 常量
+    private static final String KEY_LAT_GCJ = "lat_gcj";
+    private static final String KEY_LNG_GCJ = "lng_gcj";
+    private static final String KEY_LAT = "lat";
+    private static final String KEY_LNG = "lng";
+    private static final String KEY_ENABLED = "enabled";
+
+    // 开关状态缓存
+    private static final long ENABLED_CACHE_MS = 5000L;
+    private static boolean sEnabledCache = true;
+    private static long sEnabledCacheTs;
+
     private static XSharedPreferences sPrefs;
-    private static java.util.Map<String, String> sFilePrefs;  // 回退：/sdcard/rimet_location.txt
-    private static Context sAppCtx;
-    private static java.util.Map<String, String> sProvider;
-    private static long sProviderTs;
+    private static java.util.Map<String, String> sFilePrefs;
 
     public static void hook(ClassLoader cl) {
         try {
+            // LSPosed 的 xposedsharedprefs 机制会自动把模块 prefs 重定向到共享目录，
+            // 钉钉进程通过 XSharedPreferences 直接读，无需 root、无需 ContentProvider。
             sPrefs = new XSharedPreferences("com.sky.xposed.rimet", "location");
             sPrefs.reload();
             sFilePrefs = loadFilePrefs();
-            // provider 的 context 动态获取（Application 创建后才可用），不在此初始化
 
             // 1. 高德 AMapLocationClient
             hookAMap(cl);
@@ -126,19 +128,16 @@ public class LocationHook {
         }
     }
 
-    /** 代理高德 AMapLocationListener */
+    /** 代理高德 AMapLocationListener（只代理该单一接口，避免多接口代理导致方法签名不匹配） */
     private static Object proxyListener(final Object realListener) {
         try {
-            Class<?>[] interfaces = realListener.getClass().getInterfaces();
-            if (interfaces == null || interfaces.length == 0) {
-                Class<?> itf = XposedHelpers.findClass(
-                    "com.amap.api.location.AMapLocationListener",
-                    realListener.getClass().getClassLoader());
-                interfaces = new Class<?>[]{itf};
-            }
+            // 只代理 AMapLocationListener 接口，避免代理对象的其他接口在 invoke 时签名不匹配
+            Class<?> itf = XposedHelpers.findClass(
+                "com.amap.api.location.AMapLocationListener",
+                realListener.getClass().getClassLoader());
             return Proxy.newProxyInstance(
                 realListener.getClass().getClassLoader(),
-                interfaces,
+                new Class<?>[]{itf},
                 new InvocationHandler() {
                     @Override
                     public Object invoke(Object proxy, Method method, Object[] args) {
@@ -180,16 +179,34 @@ public class LocationHook {
     }
 
     /**
-     * 虚拟定位开关：Settings.System 里 rimet_enabled = "0" 时，放行真实位置
+     * 虚拟定位开关：prefs 里 enabled = "0"/false 时放行真实位置。
+     * 通过 XSharedPreferences 读取（LSPosed 已共享），缓存 5 秒。
      */
     private static boolean isEnabled() {
+        long now = System.currentTimeMillis();
+        if (now - sEnabledCacheTs < ENABLED_CACHE_MS) {
+            return sEnabledCache;
+        }
         try {
-            if (ctx() != null) {
-                String v = Settings.System.getString(ctx().getContentResolver(), "rimet_enabled");
-                if (v != null && v.equals("0")) return false;
+            if (sPrefs != null) {
+                sPrefs.reload();
+                // 支持 boolean 和 string 两种存储形式
+                if (sPrefs.contains(KEY_ENABLED)) {
+                    try {
+                        sEnabledCache = sPrefs.getBoolean(KEY_ENABLED, true);
+                    } catch (Throwable t) {
+                        String v = sPrefs.getString(KEY_ENABLED, "1");
+                        sEnabledCache = !"0".equals(v) && !"false".equalsIgnoreCase(v);
+                    }
+                } else {
+                    sEnabledCache = true;  // 默认开启
+                }
             }
-        } catch (Throwable ignored) {}
-        return true;  // 默认开启
+        } catch (Throwable t) {
+            sEnabledCache = true;
+        }
+        sEnabledCacheTs = now;
+        return sEnabledCache;
     }
 
     /**
@@ -205,12 +222,12 @@ public class LocationHook {
         double lat, lng;
         if (gcj02) {
             // 高德通道：读 GCJ-02 坐标
-            lat = getDouble("lat_gcj", DEFAULT_LAT);
-            lng = getDouble("lng_gcj", DEFAULT_LNG);
+            lat = getDouble(KEY_LAT_GCJ, DEFAULT_LAT);
+            lng = getDouble(KEY_LNG_GCJ, DEFAULT_LNG);
         } else {
             // 系统通道：读 WGS-84 坐标
-            lat = getDouble("lat", DEFAULT_LAT);
-            lng = getDouble("lng", DEFAULT_LNG);
+            lat = getDouble(KEY_LAT, DEFAULT_LAT);
+            lng = getDouble(KEY_LNG, DEFAULT_LNG);
         }
 
         // 优先用 setLatitude/setLongitude（android.location.Location 和高德 AMapLocation 都有）
@@ -248,38 +265,25 @@ public class LocationHook {
         }
     }
 
+    /**
+     * 读取坐标值。
+     * 优先级：XSharedPreferences（LSPosed 已共享） → 公共文件回退 → 默认值
+     */
     private static double getDouble(String key, double def) {
-        // 0) Settings.System（任何进程免权限读取，HyperOS 下最可靠）
-        try {
-            if (ctx() != null) {
-                String sv = Settings.System.getString(ctx().getContentResolver(), "rimet_" + key);
-                if (sv != null && !sv.isEmpty()) {
-                    double d = Double.parseDouble(sv);
-                    if (d != 0) return d;
-                }
-            }
-        } catch (Throwable ignored) {}
-        // 1) ContentProvider（备选）
-        String pv = providerValues().get(key);
-        if (pv != null) {
-            try {
-                double d = Double.parseDouble(pv);
-                if (d != 0) return d;
-            } catch (Throwable ignored) {}
-        }
-        // 2) XSharedPreferences（如果数据没被容器化）
+        //   XSharedPreferences，每次调用前增量刷新（内置 mtime/size 校验，变化时才重新解析）
         try {
             if (sPrefs != null) {
+                sPrefs.reload();
                 float v = sPrefs.getFloat(key, Float.NaN);
                 if (!Float.isNaN(v)) return v;
             }
         } catch (Throwable ignored) {}
-        // 3) 公共文件回退
+        // 2) 公共文件回退（/sdcard/rimet_location.txt）
         if (sFilePrefs != null && sFilePrefs.containsKey(key)) {
             try { return Double.parseDouble(sFilePrefs.get(key)); } catch (Throwable ignored) {}
         }
-        // 3) 旧数据兜底：GCJ 键缺失时退回 WGS 键
-        if (key.equals("lat_gcj") || key.equals("lng_gcj")) {
+        // 3) GCJ 键缺失时退回 WGS 键
+        if (key.equals(KEY_LAT_GCJ) || key.equals(KEY_LNG_GCJ)) {
             String alt = key.replace("_gcj", "");
             if (sFilePrefs != null && sFilePrefs.containsKey(alt)) {
                 try { return Double.parseDouble(sFilePrefs.get(alt)); } catch (Throwable ignored) {}
@@ -292,64 +296,6 @@ public class LocationHook {
             } catch (Throwable ignored) {}
         }
         return def;
-    }
-
-    /** 动态获取 Application 上下文（Application 创建前会失败，调用方需重试） */
-    private static Context ctx() {
-        if (sAppCtx != null) return sAppCtx;
-        try {
-            Class<?> at = Class.forName("android.app.ActivityThread");
-            Object app = de.robv.android.xposed.XposedHelpers.callStaticMethod(at, "currentApplication");
-            if (app instanceof Context) {
-                sAppCtx = (Context) app;
-                Log.i(TAG, "App 上下文已获取");
-                return sAppCtx;
-            }
-            Object atObj = de.robv.android.xposed.XposedHelpers.callStaticMethod(at, "currentActivityThread");
-            if (atObj != null) {
-                Object app2 = de.robv.android.xposed.XposedHelpers.callMethod(atObj, "getApplication");
-                if (app2 instanceof Context) {
-                    sAppCtx = (Context) app2;
-                    Log.i(TAG, "App 上下文已获取 (via currentActivityThread)");
-                    return sAppCtx;
-                }
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "获取上下文失败: " + t.getMessage());
-        }
-        return null;
-    }
-
-    /** 通过 ContentProvider 读坐标（成功后 30s 缓存；失败不缓存，下次重试） */
-    private static java.util.Map<String, String> providerValues() {
-        if (sProvider != null && sProviderTs > 0
-            && System.currentTimeMillis() - sProviderTs < 30000) return sProvider;
-
-        java.util.Map<String, String> m = new java.util.HashMap<>();
-        if (ctx() != null) {
-            try {
-                Cursor cur = sAppCtx.getContentResolver().query(
-                    Uri.parse("content://com.sky.xposed.rimet.loc/"), null, null, null, null);
-                if (cur != null) {
-                    int kIdx = cur.getColumnIndex("key");
-                    int vIdx = cur.getColumnIndex("value");
-                    if (kIdx >= 0 && vIdx >= 0) {
-                        while (cur.moveToNext()) m.put(cur.getString(kIdx), cur.getString(vIdx));
-                    }
-                    cur.close();
-                }
-                if (!m.isEmpty()) {
-                    sProvider = m;
-                    sProviderTs = System.currentTimeMillis();
-                    Log.i(TAG, "Provider 坐标已加载: " + m);
-                } else {
-                    Log.w(TAG, "Provider 返回空（模块应用还没保存过？）");
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "Provider 查询失败: " + t.getMessage());
-            }
-        }
-        return m;
     }
 
     /** 读 /sdcard/rimet_location.txt（key=value 行）作为回退数据源 */

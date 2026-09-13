@@ -1,7 +1,6 @@
 package com.sky.xposed.rimet;
 
 import android.content.ContentResolver;
-import android.os.Build;
 import android.provider.Settings;
 import android.util.Log;
 import java.io.File;
@@ -10,7 +9,6 @@ import java.util.Set;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public class SafetyCheckHook {
     private static final String TAG = "RimetHook-Safety";
@@ -39,20 +37,48 @@ public class SafetyCheckHook {
                     if (param.args.length >= 1 && param.args[0] instanceof String) {
                         key = (String) param.args[0];
                     }
-                    if (key != null) {
-                        if (key.equals("ro.debuggable") || key.equals("ro.adb_enabled") || key.contains("adb")) {
-                            param.setResult("get".equals(param.method.getName()) ? "0" : 0);
-                        } else if (key.equals("ro.secure") || key.equals("ro.adb.secure")) {
-                            param.setResult("get".equals(param.method.getName()) ? "1" : 1);
-                        } else if (key.equals("ro.allow.mock.location")) {
-                            param.setResult("get".equals(param.method.getName()) ? "0" : 0);
-                        } else if (key.equals("init.svc.adbd")) {
-                            param.setResult("get".equals(param.method.getName()) ? "stopped" : null);
-                        } else if (key.equals("sys.usb.state") || key.equals("sys.usb.config")) {
-                            param.setResult("get".equals(param.method.getName()) ? "none" : null);
-                        } else if (key.equals("persist.sys.usb.config")) {
-                            param.setResult("get".equals(param.method.getName()) ? "none" : null);
-                        }
+                    if (key == null) return;
+
+                    // 按方法名字符串推断返回类型，避免 getReturnType() 在 android.jar stub 下不可用
+                    String mn = param.method.getName();
+
+                    if (key.equals("ro.debuggable") || key.equals("ro.adb_enabled") || key.equals("ro.allow.mock.location")
+                            || key.contains("adb")) {
+                        // 统一返回「非调试」
+                        setTypedResult(param, 0, false, "0");
+                    } else if (key.equals("ro.secure") || key.equals("ro.adb.secure")) {
+                        setTypedResult(param, 1, true, "1");
+                    } else if (key.equals("init.svc.adbd")) {
+                        // adbd 未运行
+                        setTypedNull(param, "stopped");
+                    } else if (key.equals("sys.usb.state") || key.equals("sys.usb.config")
+                            || key.equals("persist.sys.usb.config")) {
+                        // USB 无调试连接
+                        setTypedNull(param, "none");
+                    }
+                }
+
+                /** 根据方法名字符串推断返回类型，设置对应的安全值 */
+                private void setTypedResult(MethodHookParam param, int iVal, boolean bVal, String sVal) {
+                    String n = param.method.getName();
+                    if (n.equals("getInt") || n.equals("getLong")) {
+                        param.setResult(n.equals("getLong") ? (long) iVal : iVal);
+                    } else if (n.equals("getBoolean")) {
+                        param.setResult(bVal);
+                    } else {
+                        param.setResult(sVal);
+                    }
+                }
+
+                /** 对非数值/布尔方法返回字符串，数值返回 0，布尔返回 false */
+                private void setTypedNull(MethodHookParam param, String sVal) {
+                    String n = param.method.getName();
+                    if (n.equals("getInt") || n.equals("getLong")) {
+                        param.setResult(n.equals("getLong") ? 0L : 0);
+                    } else if (n.equals("getBoolean")) {
+                        param.setResult(false);
+                    } else {
+                        param.setResult(sVal);
                     }
                 }
             };
@@ -141,19 +167,36 @@ public class SafetyCheckHook {
         }
     }
 
-    /** hook File.exists 拦截 su 文件检测 */
+    /** hook File.exists 拦截常见 su 二进制探测（精确路径段匹配，避免误伤 libsuspend 等库） */
     private static void hookFileExists(ClassLoader cl) {
+        // su 常见路径 —— 只有以这些精确路径结尾时才拦截
+        final String[] SU_PATHS = {
+            "/su", "/su/bin/su", "/system/xbin/su",
+            "/system/bin/su", "/sbin/su", "/system/su",
+            "/system/.su", "/system/xbin/.su",
+            "/system/bin/.su", "/system/sbin/su"
+        };
         try {
             XposedHelpers.findAndHookMethod(java.io.File.class, "exists", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     File f = (File) param.thisObject;
                     String path = f.getAbsolutePath();
-                    if (path.contains("su") && (path.startsWith("/system/") || 
-                        path.startsWith("/sbin/") || path.startsWith("/magisk") || 
-                        path.equals("/su"))) {
+                    // /magisk 前缀精细化：只拦截 magisk su 和 zygisk su
+                    if (path.startsWith("/magisk") &&
+                            (path.equals("/magisk/.core/bin/su") ||
+                             path.endsWith("/magisk/su") ||
+                             path.contains("magiskhide"))) {
                         param.setResult(false);
-                        Log.d(TAG, "File.exists(" + path + ") → false");
+                        Log.d(TAG, "File.exists(" + path + ") → false (magisk)");
+                        return;
+                    }
+                    for (String suP : SU_PATHS) {
+                        if (path.equals(suP)) {
+                            param.setResult(false);
+                            Log.d(TAG, "File.exists(" + path + ") → false (su)");
+                            return;
+                        }
                     }
                 }
             });

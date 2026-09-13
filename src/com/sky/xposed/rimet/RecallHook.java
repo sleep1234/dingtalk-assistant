@@ -1,6 +1,5 @@
 package com.sky.xposed.rimet;
 
-import android.content.ContentValues;
 import android.util.Log;
 
 import java.lang.reflect.Field;
@@ -9,9 +8,7 @@ import java.util.Collections;
 import java.util.List;
 
 import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
  * 钉钉 8.x 防撤回 Hook
@@ -29,6 +26,12 @@ public class RecallHook {
     private static final String TAG = "RimetHook-Recall";
     private static final int MSG_TYPE_RECALL = 126;
     private static final int MSG_TYPE_TEXT = 10;
+
+    // 钉钉 8.x 混淆类名（随钉钉版本变化，升级后需重新分析）
+    private static final String CLS_RECALL_RPC = "v9h";
+    private static final String CLS_MESSAGE_DS = "x6h";
+    private static final String CLS_WUKONG_CALLBACK = "com.alibaba.wukong.Callback";
+    private static final String CLS_IM_DATABASE = "com.alibaba.wukong.im.base.IMDatabase";
 
     public static void hook(ClassLoader cl) {
         sClassLoader = cl;
@@ -52,11 +55,11 @@ public class RecallHook {
      */
     private static void hookRecallRpc(ClassLoader cl) {
         try {
-            Class<?> msgRpc = XposedHelpers.findClass("v9h", cl);
+            Class<?> msgRpc = XposedHelpers.findClass(CLS_RECALL_RPC, cl);
 
             // 单条撤回: v9h.K(String cid, long mid, Callback)
             XposedHelpers.findAndHookMethod(msgRpc, "K",
-                String.class, long.class, "com.alibaba.wukong.Callback",
+                String.class, long.class, CLS_WUKONG_CALLBACK,
                 new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
@@ -68,7 +71,7 @@ public class RecallHook {
 
             // 批量撤回: v9h.J(String cid, List, int recallType, Callback)
             XposedHelpers.findAndHookMethod(msgRpc, "J",
-                String.class, List.class, int.class, "com.alibaba.wukong.Callback",
+                String.class, List.class, int.class, CLS_WUKONG_CALLBACK,
                 new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
@@ -89,7 +92,7 @@ public class RecallHook {
      */
     private static void hookMessageHandler(ClassLoader cl) {
         try {
-            Class<?> messageDs = XposedHelpers.findClass("x6h", sClassLoader);
+            Class<?> messageDs = XposedHelpers.findClass(CLS_MESSAGE_DS, sClassLoader);
 
             // x6h.c(String cid, Collection<MessageImpl> messages, boolean)
             XposedHelpers.findAndHookMethod(messageDs, "c",
@@ -103,7 +106,7 @@ public class RecallHook {
                         if (messages == null || messages.isEmpty()) return;
 
                         for (Object msg : messages) {
-                            handleMessage(cid, msg, null);
+                            handleMessage(cid, msg, sClassLoader);
                         }
                     }
                 });
@@ -144,16 +147,14 @@ public class RecallHook {
 
             // 更新到数据库: x6h.T(String dbName, String cid, List msgList)
             try {
-                Class<?> imDatabase = XposedHelpers.findClass(
-                    "com.alibaba.wukong.im.base.IMDatabase", sClassLoader);
+                Class<?> imDatabase = XposedHelpers.findClass(CLS_IM_DATABASE, sClassLoader);
                 String dbName = (String) XposedHelpers.callStaticMethod(
                     imDatabase, "getWritableDatabase");
 
-                Class<?> msgDs = XposedHelpers.findClass("x6h", cl);
-                Object result = XposedHelpers.findMethodBestMatch(msgDs, "T",
-                    String.class, String.class, List.class)
-                    .invoke(null, dbName, cid,
-                        Collections.singletonList(latestMsg));
+                // 用 callStaticMethod 而非原始反射，避免误触 Xposed 桥接与异常封装问题
+                XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass(CLS_MESSAGE_DS, cl != null ? cl : sClassLoader), "T",
+                    dbName, cid, Collections.singletonList(latestMsg));
 
             } catch (Throwable t) {
                 Log.w(TAG, "更新撤回消息到DB失败", t);

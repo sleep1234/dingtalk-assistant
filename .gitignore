@@ -1,0 +1,9 @@
+# 构建中间产物
+build/rebuild/
+
+# IDE
+.idea/
+*.iml
+
+# macOS
+.DS_Store

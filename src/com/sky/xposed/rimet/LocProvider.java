@@ -16,6 +16,13 @@ import android.net.Uri;
 public class LocProvider extends ContentProvider {
 
     private static final String[] COLS = {"key", "value"};
+    // 与 LocationHook 读取的 key 保持一致
+    private static final String K_LAT = "lat";
+    private static final String K_LNG = "lng";
+    private static final String K_LAT_GCJ = "lat_gcj";
+    private static final String K_LNG_GCJ = "lng_gcj";
+    private static final String K_ADDR = "addr";
+    private static final String K_TS = "ts";
 
     @Override
     public boolean onCreate() {
@@ -27,12 +34,12 @@ public class LocProvider extends ContentProvider {
                          String[] selectionArgs, String sortOrder) {
         SharedPreferences p = getContext().getSharedPreferences("location", Context.MODE_PRIVATE);
         MatrixCursor c = new MatrixCursor(COLS, 8);
-        c.addRow(new Object[]{"lat", String.valueOf(p.getFloat("lat", 0f))});
-        c.addRow(new Object[]{"lng", String.valueOf(p.getFloat("lng", 0f))});
-        c.addRow(new Object[]{"lat_gcj", String.valueOf(p.getFloat("lat_gcj", 0f))});
-        c.addRow(new Object[]{"lng_gcj", String.valueOf(p.getFloat("lng_gcj", 0f))});
-        c.addRow(new Object[]{"addr", String.valueOf(p.getString("addr", ""))});
-        c.addRow(new Object[]{"ts", String.valueOf(System.currentTimeMillis())});
+        c.addRow(new Object[]{K_LAT, String.valueOf(p.getFloat(K_LAT, 0f))});
+        c.addRow(new Object[]{K_LNG, String.valueOf(p.getFloat(K_LNG, 0f))});
+        c.addRow(new Object[]{K_LAT_GCJ, String.valueOf(p.getFloat(K_LAT_GCJ, 0f))});
+        c.addRow(new Object[]{K_LNG_GCJ, String.valueOf(p.getFloat(K_LNG_GCJ, 0f))});
+        c.addRow(new Object[]{K_ADDR, String.valueOf(p.getString(K_ADDR, ""))});
+        c.addRow(new Object[]{K_TS, String.valueOf(System.currentTimeMillis())});
         return c;
     }
 
