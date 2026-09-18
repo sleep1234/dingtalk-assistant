@@ -28,8 +28,8 @@ public class RecallHook {
     private static final int MSG_TYPE_TEXT = 10;
 
     // 钉钉 8.x 混淆类名（随钉钉版本变化，升级后需重新分析）
-    private static final String CLS_RECALL_RPC = "v9h";
-    private static final String CLS_MESSAGE_DS = "x6h";
+    private static final String CLS_RECALL_RPC = "defpackage.v9h";
+    private static final String CLS_MESSAGE_DS = "defpackage.x6h";
     private static final String CLS_WUKONG_CALLBACK = "com.alibaba.wukong.Callback";
     private static final String CLS_IM_DATABASE = "com.alibaba.wukong.im.base.IMDatabase";
 
@@ -148,13 +148,25 @@ public class RecallHook {
             // 更新到数据库: x6h.T(String dbName, String cid, List msgList)
             try {
                 Class<?> imDatabase = XposedHelpers.findClass(CLS_IM_DATABASE, sClassLoader);
-                String dbName = (String) XposedHelpers.callStaticMethod(
-                    imDatabase, "getWritableDatabase");
+// 获取数据库名字符串（IMDatabase.getWritableDatabase() 返回数据库路径/名称）
+                    Object dbName = XposedHelpers.callStaticMethod(
+                        imDatabase, "getWritableDatabase");
+                    if (dbName == null) return;
 
-                // 用 callStaticMethod 而非原始反射，避免误触 Xposed 桥接与异常封装问题
-                XposedHelpers.callStaticMethod(
-                    XposedHelpers.findClass(CLS_MESSAGE_DS, cl != null ? cl : sClassLoader), "T",
-                    dbName, cid, Collections.singletonList(latestMsg));
+// x6h.T(String dbName, String cid, List msgList) 是实例方法
+                    Class<?> x6hCls = XposedHelpers.findClass(CLS_MESSAGE_DS, sClassLoader);
+                    // 需要获取 x6h 的实例。MessageDs 是单例或全局对象，
+                    // 用 getDefaultInstance() 或通过调用 static getInstance() 获取。
+                    // 退一步：先用 callStaticMethod 尝试，失败则打日志。
+                    try {
+                        XposedHelpers.callStaticMethod(x6hCls, "T",
+                            dbName, cid, Collections.singletonList(latestMsg));
+                    } catch (NoSuchMethodError e) {
+                        // T 方法是实例方法，尝试通过静态 getInstance() 获取实例
+                        Object instance = XposedHelpers.callStaticMethod(x6hCls, "getInstance");
+                        XposedHelpers.callMethod(instance, "T",
+                            dbName, cid, Collections.singletonList(latestMsg));
+                    }
 
             } catch (Throwable t) {
                 Log.w(TAG, "更新撤回消息到DB失败", t);

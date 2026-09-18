@@ -78,7 +78,7 @@ public class SettingsActivity extends Activity
             MapsInitializer.initialize(this);
         } catch (Throwable t) { Log.e(TAG, "地图初始化失败", t); }
 
-        mPrefs = getSharedPreferences("location", MODE_WORLD_READABLE);
+        mPrefs = getSharedPreferences("location", MODE_PRIVATE);
         float glat = mPrefs.getFloat("lat_gcj", Float.NaN);
         float glng = mPrefs.getFloat("lng_gcj", Float.NaN);
         if (!Float.isNaN(glat) && !Float.isNaN(glng)) {
@@ -324,24 +324,49 @@ public class SettingsActivity extends Activity
     void saveLocation(String name) {
         double[] wgs = gcj02ToWgs84(mLat, mLng);
 
-        // 写入 SharedPreferences —— LSPosed 的 xposedsharedprefs 会自动重定向到共享路径，
-        // 钉钉进程的 LocationHook 通过 XSharedPreferences 直接读到，无需 root。
-        mPrefs.edit()
-            .putFloat("lat", (float) wgs[0])
-            .putFloat("lng", (float) wgs[1])
-            .putFloat("lat_gcj", (float) mLat)
-            .putFloat("lng_gcj", (float) mLng)
-            .putString("addr", name)
-            .commit();
-        fixPrefsPermission();
+        // 写公共定位文件 /data/local/tmp/rimet_location.txt（通过 root，避開 Scoped Storage）
+        writePublicFile(wgs, mLat, mLng, name);
 
-        // 追加到位置列表
+        // 也写 SharedPreferences（如果生效的话），fixPrefsPermission 尝试修权限
+        try {
+            mPrefs.edit()
+                .putFloat("lat", (float) wgs[0])
+                .putFloat("lng", (float) wgs[1])
+                .putFloat("lat_gcj", (float) mLat)
+                .putFloat("lng_gcj", (float) mLng)
+                .putString("addr", name)
+                .commit();
+            fixPrefsPermission();
+        } catch (Throwable t) {
+            Log.e(TAG, "prefs 写入失败", t);
+        }
+
         addToList(name, mLat, mLng, wgs[0], wgs[1]);
 
         toast("已保存: " + name);
         updateText();
         refreshListView();
     }
+
+    /** 通过 root 写 /data/local/tmp/rimet_location.txt，钉钉 LocationHook 直接读取 */
+    private void writePublicFile(double[] wgs, double gcjLat, double gcjLng, String addr) {
+        try {
+            String cmd = "echo enabled=1 > " + PUBLIC_FILE
+                + "; echo lat=" + (float) wgs[0] + " >> " + PUBLIC_FILE
+                + "; echo lng=" + (float) wgs[1] + " >> " + PUBLIC_FILE
+                + "; echo lat_gcj=" + gcjLat + " >> " + PUBLIC_FILE
+                + "; echo lng_gcj=" + gcjLng + " >> " + PUBLIC_FILE
+                + "; echo addr=" + addr + " >> " + PUBLIC_FILE
+                + "; chmod 644 " + PUBLIC_FILE;
+            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+            p.waitFor();
+            Log.i(TAG, "公共定位文件已写入: " + PUBLIC_FILE);
+        } catch (Throwable t) {
+            Log.e(TAG, "写入公共定位文件失败", t);
+        }
+    }
+
+    private static final String PUBLIC_FILE = "/data/local/tmp/rimet_location.txt";
 
     /**
      * 关键：把 prefs 文件设为所有进程可读（0644）。
@@ -429,6 +454,8 @@ public class SettingsActivity extends Activity
             .putString("addr", it.addr)
             .commit();
         fixPrefsPermission();
+        // 同步写公共文件（钉钉 LocationHook 第一优先级读取通道）
+        writePublicFile(wgs, it.lat, it.lng, it.addr);
         updateText();
         toast("已切换到: " + it.addr);
     }
@@ -475,6 +502,7 @@ public class SettingsActivity extends Activity
     void setSwitchOn(final boolean on) {
         mPrefs.edit().putBoolean("enabled", on).commit();
         fixPrefsPermission();
+        writeSystemSetting("rimet_enabled", on ? "1" : "0");
     }
 
     // ====== 坐标系转换 ======
@@ -537,6 +565,22 @@ public class SettingsActivity extends Activity
 
     void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
     int dpPx(int dp) { return (int)(dp * getResources().getDisplayMetrics().density); }
+
+    /**
+     * 以 root 身份写 Settings.Global（rimet_* 键）。
+     * 用 Global 而非 System，避开 HyperOS 对 Settings.System 的 PUBLIC_SETTINGS 白名单限制。
+     * 通过 `su -c settings put global ...` 执行。设备需已 root（Magisk）。
+     */
+    private void writeSystemSetting(String key, String value) {
+        try {
+            Process p = Runtime.getRuntime().exec(
+                new String[]{"su", "-c", "settings put global " + key + " " + value});
+            p.waitFor();
+            Log.i(TAG, "Settings.Global " + key + "=" + value + " 写入完成");
+        } catch (Throwable t) {
+            Log.e(TAG, "写 Settings.Global 失败: " + key, t);
+        }
+    }
 
     @Override protected void onResume() { super.onResume(); mMapView.onResume(); }
     @Override protected void onPause() { super.onPause(); mMapView.onPause(); }
