@@ -1,10 +1,10 @@
-# RimetHook（钉钉助手 - 复活版）
+# RimetHook（钉钉助手-复活）
 
 钉钉（`com.alibaba.android.rimet`）的 Xposed 模块，提供三大功能：
 
 | 功能 | 说明 |
 | --- | --- |
-| 📍 虚拟定位 | 地图选点 / 位置列表快速切换，支持 GCJ-02 与 WGS-84 双坐标系，高德与系统双通道改写 |
+| 📍 虚拟定位 | 地图选点 / 位置列表快速切换，支持 GCJ-02 与 WGS-84 双坐标系，热重载无需重启钉钉 |
 | 💬 防撤回 | 拦截钉钉撤回 RPC，被撤回的文本消息在本地追加「[已撤回]」标记，对方撤回后内容仍可见 |
 | 🛡️ 安全检测绕过 | 隐藏 root / 开发者选项 / 调试状态，绕过 SystemProperties、Settings、Debug、File.exists 等检测项 |
 
@@ -17,21 +17,22 @@
 
 ### 1. 虚拟定位（`LocationHook`）
 
-- **主通道**：hook 高德 `AMapLocationClient`
-  - `setLocationListener` → 用动态代理包裹 listener，在 `onLocationChanged` 回调中原地改写坐标（GCJ-02）
-  - `getLastKnownLocation` → 强制返回 `null`，逼迫钉钉重新发起定位
-- **兜底通道**：hook 系统 `LocationManager.requestLocationUpdates`，代理系统 `LocationListener`（WGS-84）
-- 优先调用 `setLatitude/setLongitude` 改写对象，失败时反射修改字段（`f/h/g/i` 等混淆字段名兜底）
+- **结果层拦截**：hook `AMapLocation.getLatitude/getLongitude`，直接返回值改写，任何遗漏的调用方都无法绕过
+- **门面层拦截**：hook 钉钉自研 `LocationProxy.onLocationChanged()`（钉钉所有定位请求的统一入口），在此拦截坐标影响所有下游观察者
+- **监听器代理**：hook `AMapLocationClient.setLocationListener`，用动态代理包裹 listener 原地改写坐标
+- **缓存绕过**：hook `AMapLocationClient.getLastKnownLocation` / `LocationManager.getLastKnownLocation`，强制返回 `null` 逼迫重新定位
+- **兜底通道**：hook 系统 `LocationManager.requestLocationUpdates`（含 Looper 重载），代理系统 `LocationListener`（WGS-84）
+- **热重载**：位置切换后通过文件 mtime 检测自动重载坐标，**无需重启钉钉**
 
-**坐标读取优先级**（从高到低）：
+**坐标/开关读取优先级**（从高到低）：
 
-1. `Settings.System` 的 `rimet_*` 键（任何进程免权限可读，HyperOS 下最可靠）
-2. 模块自带 `ContentProvider`（`content://com.sky.xposed.rimet.loc/`，30 秒缓存）
-3. `XSharedPreferences`（shared_prefs 名为 `location`）
-4. 公共文件 `/sdcard/rimet_location.txt`（`key=value` 行格式）
-5. 默认值：台州市政府（椒江区）`28.6557, 121.4200`
+1. 公共文件 `/data/local/tmp/rimet_location.txt`（`key=value` 行格式，由模块界面通过 root 写入）
+2. `XSharedPreferences`（shared_prefs 名为 `location`）
+3. 默认值：台州市政府（椒江区）`28.6557, 121.4200`
 
-**开关**：`Settings.System` 的 `rimet_enabled` 为 `"0"` 时放行真实位置，默认开启。
+> **v6 改进说明**：原 v4 版本的 `Settings.System` 和 `Settings.Global` 通道在 Android 14（HyperOS）上均被系统权限校验拦截（`Package android does not belong to uid 10412`），`/sdcard/rimet_location.txt` 被 Scoped Storage 拒绝。v6 改用 `/data/local/tmp/rimet_location.txt`（所有进程可读的公共目录），通过模块界面的 `su -c` root 写入，钉钉进程直接读取，同时加入 mtime 热重载机制。
+
+**开关**：模块界面「启用虚拟定位」开关控制总闸，关闭后钉钉读取真实位置。开关状态也通过公共文件传递，热重载即时生效。
 
 ### 2. 防撤回（`RecallHook`，针对钉钉 8.x 混淆）
 
@@ -48,7 +49,7 @@
 1. 拦截 `v9h` 的两个撤回 RPC，直接 `setResult(null)`，撤回请求不发出
 2. hook `x6h.c` 消息处理流程，检测到撤回通知（type=126）时，找到被撤回的文本消息（type=10），把内容改为 `原文 [已撤回]` 并写回数据库
 
-> 注意：混淆映射随钉钉版本变化，新版钉钉更新后需重新分析混淆类名。
+> **v6 修复**：原 v4 版本中混淆类名缺少 `defpackage.` 前缀（`v9h` → `defpackage.v9h`），导致防撤回功能完全失效。此外 `getWritableDatabase()` 强制返回类型转换和 `callStaticMethod` 调用实例方法的问题也已修复。
 
 ### 3. 安全检测绕过（`SafetyCheckHook`）
 
@@ -65,58 +66,61 @@
 ### 前置要求
 
 - 已 root 的设备，并装有 **LSPosed / EdXposed / Xposed 框架**（Xposed 版本 ≥ 82）
-- 安装本模块 APK（见「构建」），或在 LSPosed 模块列表中安装仓库根目录的 `RimetHook-v8.apk`
+- 安装本模块 APK（见「构建」下方产物说明）
 - 框架中勾选模块并指定作用域为 **钉钉**（`com.alibaba.android.rimet`），重启设备
 
 ### 使用虚拟定位
 
-1. 桌面打开「**虚拟定位设置**」（模块自带界面 `SettingsActivity`）
+1. 桌面打开「钉钉助手-复活」（模块自带界面 `SettingsActivity`）
 2. 拖动地图或点「定位到我的位置」选点（坐标系自动按 GCJ-02 处理）
-3. 点「保存当前位置」并给位置起名 → 坐标写入模块 SharedPreferences，同时通过 root 写 `Settings.System` 的 `rimet_*` 键
-4. 位置列表支持：**点击**切换（立即生效）、**长按**删除
-5. 「启用虚拟定位」开关控制总闸：关闭后钉钉读取真实位置
-6. 保存后**重启钉钉**生效
+3. 点「保存当前位置」并给位置起名 → 坐标通过 root 写入公共文件，钉钉热重载后立即生效
+4. 位置列表支持：**点击**切换（热重载，无需重启钉钉）、**长按**删除
+5. 「启用虚拟定位」开关控制总闸：开关状态也通过公共文件传递，关闭后钉钉立即读取真实位置
+6. 保存/切换后**无需重启钉钉**（热重载自动检测文件变化）
 
 ### 免地图的纯命令行方式
 
-`Settings.System` 键可直接用 `settings` 命令写入（需 root）：
+公共文件 `/data/local/tmp/rimet_location.txt`（`key=value` 行格式，需 root 写入）：
 
 ```sh
-settings put system rimet_lat_gcj 28.6557
-settings put system rimet_lng_gcj 121.4200
-settings put system rimet_lat    28.6535    # WGS-84 通道
-settings put system rimet_lng    121.4180
-settings put system rimet_addr   "家"
-settings put system rimet_enabled 1        # 0 = 关闭虚拟定位
+su -c "echo enabled=1 > /data/local/tmp/rimet_location.txt"
+su -c "echo lat_gcj=28.6557 >> /data/local/tmp/rimet_location.txt"
+su -c "echo lng_gcj=121.4200 >> /data/local/tmp/rimet_location.txt"
+su -c "echo lat=28.6535 >> /data/local/tmp/rimet_location.txt"
+su -c "echo lng=121.4180 >> /data/local/tmp/rimet_location.txt"
+su -c "chmod 644 /data/local/tmp/rimet_location.txt"
 ```
 
-或使用公共文件 `/sdcard/rimet_location.txt`（`key=value` 行格式，键名同上）作为最后回退数据源。
+enable 为 `0` 时关闭虚拟定位，`1` 时开启。
 
 ## 构建
 
 ### 工具链
 
-- JDK 8/11 + Android SDK（`aapt` / `aapt2` / `d8`）
+- JDK 8/11 + Android SDK（`aapt2` / `d8`）
 - 编译期 classpath：`lib/android.jar`（目标 API 级别）+ `lib/xposed-api-82.jar` + 高德 SDK（`lib/3dmap-7.0.0.jar`、`lib/map2d-6.0.0.jar`、`lib/search-9.7.1.jar`）
 
 ### 编译与打包
 
-本仓库无 Gradle 工程，采用 aapt + javac + d8 手动打包流程（可参考 `build/` 下各 API 级别的产物）：
+本仓库无 Gradle 工程，采用手动打包流程：
 
 ```bash
-# 1. 资源打包（按目标 API 选 aapt）
-aapt compile / p 输出 resources + AndroidManifest
+# 1. 编译资源（图标等）
+aapt2 compile --legacy --dir res -o compiled.zip
+aapt2 link -o res.apk -I $ANDROID_HOME/platforms/android-34/android.jar \
+    --manifest AndroidManifest.xml compiled.zip --min-sdk-version 21
 
-# 2. 按目标 API 级别编译（不同 API 级别的 android.jar 产物放 build/c33 ~ c46）
-# 注意：必须加 -encoding UTF-8，否则 Windows 下中文注释会因 GBK 编码导致编译失败
-javac -encoding UTF-8 -bootclasspath lib/android.jar \
-      -cp "lib/xposed-api-82.jar:lib/3dmap-7.0.0.jar:lib/map2d-6.0.0.jar:lib/search-9.7.1.jar" \
-      -d build/cXX src/com/sky/xposed/rimet/*.java
+# 2. 编译 Java 源码
+javac -encoding UTF-8 -source 1.8 -target 1.8 \
+      -cp "lib/xposed-api-82.jar:lib/android.jar:lib/3dmap-7.0.0.jar:lib/map2d-6.0.0.jar:lib/search-9.7.1.jar" \
+      -d build/classes src/com/sky/xposed/rimet/*.java
 
 # 3. dex 化
-d8 --min-api XX build/cXX/**/*.class --output build/apk
+d8 --min-api 21 build/classes/com/sky/xposed/rimet/*.class \
+    lib/3dmap-7.0.0.jar lib/map2d-6.0.0.jar lib/search-9.7.1.jar \
+    --output build/dex
 
-# 4. 组装 APK：resources + classes.dex + assets/xposed_init + 签名
+# 4. 组装 APK：resources.arsc + AndroidManifest + res/ + classes.dex + assets/xposed_init + 签名
 ```
 
 `assets/xposed_init` 内容固定为一行入口类：
@@ -129,24 +133,30 @@ com.sky.xposed.rimet.Main
 
 | 路径 | 说明 |
 | --- | --- |
-| `RimetHook-v8.apk` | 当前推荐安装版本（v8） |
+| `RimetHook-v8.apk` | 原始版本（v4），作为构建基底 |
 | `build/aNN.apk` | 按 API 级别（33 ~ 46）构建的完整模块 APK |
-| `build/aaptNN.apk` | 各 API 级别的资源包中间产物 |
-| `build/cNN/` | 各 API 级别的 class 编译产物 |
+| `res/` | 模块资源（桌面图标各密度版） |
 | `lib/*.jar` | 编译期依赖（android.jar / xposed-api / 高德 SDK），**不随 APK 分发** |
 
 ## 项目结构
 
 ```
-├── AndroidManifest.xml        # 模块清单（Xposed 模块声明 + 权限 + Provider + Activity）
+├── AndroidManifest.xml        # 模块清单（Xposed 模块声明 + 权限 + Provider + Activity + 图标引用）
 ├── assets/xposed_init         # Xposed 入口：com.sky.xposed.rimet.Main
+├── res/                       # 模块资源（桌面图标等）
+│   ├── drawable/
+│   ├── mipmap-mdpi/
+│   ├── mipmap-hdpi/
+│   ├── mipmap-xhdpi/
+│   ├── mipmap-xxhdpi/
+│   └── mipmap-xxxhdpi/
 ├── src/com/sky/xposed/rimet/
 │   ├── Main.java              # IXposedHookLoadPackage 入口，仅加载钉钉时安装 hook
-│   ├── LocationHook.java      # 虚拟定位（高德 + 系统双通道）
+│   ├── LocationHook.java      # 虚拟定位（v6：公共文件 + 热重载 + 多层拦截）
 │   ├── RecallHook.java        # 防撤回（8.x 混淆 v9h / x6h）
 │   ├── SafetyCheckHook.java   # root / 开发者选项 / 调试检测绕过
 │   ├── LocProvider.java       # ContentProvider，对外暴露定位坐标
-│   └── SettingsActivity.java  # 模块设置界面（高德地图选点 + 位置列表）
+│   └── SettingsActivity.java  # 模块设置界面（现代化 UI：卡片式 + 钉钉蓝主题）
 ├── lib/                       # 编译期依赖 jar（不打包进 APK）
 └── build/                     # 各 API 级别构建产物
 ```
@@ -161,7 +171,8 @@ adb logcat -s RimetHook RimetHook-Safety RimetHook-Recall RimetHook-Location Rim
 
 - `RimetHook-Safety`：安全检测绕过安装日志（每个被 hook 的方法都有输出）
 - `RimetHook-Recall`：撤回 RPC 拦截 / 消息处理记录
-- `RimetHook-Location`：定位改写记录（含数据源命中情况）
+- `RimetHook-Location`：定位改写记录（含公共文件加载、热重载检测、坐标修改）
+- `RimetHook-Map`：模块界面日志
 
 ## 免责声明
 
