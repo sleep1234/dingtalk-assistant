@@ -6,6 +6,9 @@ import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -13,6 +16,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -45,6 +50,15 @@ public class SettingsActivity extends Activity
     // 高德地图 Android key（与 AndroidManifest.xml 中的 com.amap.api.v2.apikey 保持一致）
     private static final String AMAP_KEY = "6528e2dca132967d339e407699815a8d";
 
+    // 主题色：钉钉蓝
+    private static final int COLOR_PRIMARY = 0xFF0089FF;
+    private static final int COLOR_PRIMARY_DARK = 0xFF0066CC;
+    private static final int COLOR_BG = 0xFFF5F6F8;
+    private static final int COLOR_CARD = 0xFFFFFFFF;
+    private static final int COLOR_TEXT_MAIN = 0xFF1F2329;
+    private static final int COLOR_TEXT_SUB = 0xFF86909C;
+    private static final int COLOR_DIVIDER = 0xFFE5E6EB;
+
     private MapView mMapView;
     private AMap mAMap;
     private Marker mMarker;       // 红色：已保存的激活位置（不可拖动）
@@ -67,6 +81,11 @@ public class SettingsActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // 隐藏系统标题栏（HyperOS 下 ActionBar 会显示 activity label）
+        android.app.ActionBar ab = getActionBar();
+        if (ab != null) ab.hide();
+        setTitle(null);
 
         requestLocationPermission();
 
@@ -91,68 +110,118 @@ public class SettingsActivity extends Activity
 
         loadList();
 
-        // 整体纵向布局：标题 + 地图固定在上方，位置列表独立滚动
-        // （不再用 ScrollView 包住地图，避免列表项过多导致地图拖拽/缩放手势被拦截）
+        // ============ 现代化布局 ============
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(COLOR_BG);
 
-        // 页面标题
+        // --- 顶部标题栏（渐变蓝底） ---
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setPadding(dpPx(20), dpPx(20), dpPx(20), dpPx(18));
+        header.setBackground(rounded(COLOR_PRIMARY, 0, 0, dpPx(24), dpPx(24)));
+
         TextView tvTitle = new TextView(this);
-        tvTitle.setText("钉钉助手-复活版");
-        tvTitle.setTextSize(22);
-        tvTitle.setTextColor(0xFF222222);
-        tvTitle.setPadding(dpPx(12), dpPx(14), dpPx(12), dpPx(2));
-        root.addView(tvTitle);
+        tvTitle.setText("钉钉助手-复活");
+        tvTitle.setTextSize(24);
+        tvTitle.setTextColor(Color.WHITE);
+        tvTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        header.addView(tvTitle);
 
-        // 作者（标题下方）
-        TextView tvAuthor = new TextView(this);
-        tvAuthor.setText("作者：毛利老王");
-        tvAuthor.setTextSize(12);
-        tvAuthor.setTextColor(0xFF999999);
-        tvAuthor.setPadding(dpPx(12), dpPx(0), dpPx(12), dpPx(6));
-        root.addView(tvAuthor);
+        TextView tvSubtitle = new TextView(this);
+        tvSubtitle.setText("虚拟定位 · 防撤回 · 安全绕过");
+        tvSubtitle.setTextSize(13);
+        tvSubtitle.setTextColor(0xB3FFFFFF);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        subLp.topMargin = dpPx(4);
+        header.addView(tvSubtitle, subLp);
 
-        // 功能描述
+        root.addView(header);
+
+        // --- 功能说明卡片 ---
         TextView tvDesc = new TextView(this);
-        tvDesc.setText("功能：\n• 虚拟定位（地图选点 + 位置列表快速切换）\n• 防撤回（对方撤回仍可见）\n• 开发者选项/调试/root 检测绕过\n\n用法：拖动地图选点 → 保存当前位置 → 重启钉钉生效。\n关闭「启用虚拟定位」开关即可读取真实位置。");
-        tvDesc.setTextSize(12);
-        tvDesc.setTextColor(0xFF666666);
-        tvDesc.setPadding(dpPx(12), dpPx(4), dpPx(12), dpPx(8));
-        root.addView(tvDesc);
+        tvDesc.setText("拖动地图选点后保存，即可在钉钉中虚拟定位到该位置。\n关闭下方开关可恢复真实位置。");
+        tvDesc.setTextSize(13);
+        tvDesc.setTextColor(COLOR_TEXT_SUB);
+        tvDesc.setPadding(dpPx(16), dpPx(12), dpPx(16), dpPx(12));
+        tvDesc.setBackground(rounded(COLOR_CARD, dpPx(12)));
+        LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        descLp.leftMargin = dpPx(12);
+        descLp.rightMargin = dpPx(12);
+        descLp.topMargin = dpPx(12);
+        root.addView(tvDesc, descLp);
 
-        // 地图 320dp
+        // --- 地图卡片 ---
+        FrameLayout mapWrap = new FrameLayout(this);
         mMapView = new MapView(this);
         mMapView.onCreate(savedInstanceState);
-        FrameLayout mapWrap = new FrameLayout(this);
         mapWrap.addView(mMapView, new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, dpPx(320)));
-        root.addView(mapWrap);
+            FrameLayout.LayoutParams.MATCH_PARENT, dpPx(300)));
+        mapWrap.setBackground(rounded(COLOR_CARD, dpPx(12)));
+        LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dpPx(300));
+        mapLp.leftMargin = dpPx(12);
+        mapLp.rightMargin = dpPx(12);
+        mapLp.topMargin = dpPx(12);
+        root.addView(mapWrap, mapLp);
 
-        // 信息栏
+        // --- 信息栏（当前坐标） ---
         mTvInfo = new TextView(this);
-        mTvInfo.setTextSize(13);
-        mTvInfo.setPadding(dpPx(12), dpPx(8), dpPx(12), 0);
-        root.addView(mTvInfo);
+        mTvInfo.setTextSize(14);
+        mTvInfo.setTextColor(COLOR_TEXT_MAIN);
+        mTvInfo.setTypeface(Typeface.MONOSPACE);
+        mTvInfo.setPadding(dpPx(16), dpPx(10), dpPx(16), dpPx(10));
+        mTvInfo.setBackground(rounded(COLOR_CARD, dpPx(12)));
+        LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        infoLp.leftMargin = dpPx(12);
+        infoLp.rightMargin = dpPx(12);
+        infoLp.topMargin = dpPx(12);
+        root.addView(mTvInfo, infoLp);
 
-        // 按钮行（保存 + 定位）
+        // --- 按钮行 ---
         LinearLayout btns = new LinearLayout(this);
         btns.setOrientation(LinearLayout.HORIZONTAL);
-        Button bSave = new Button(this);
-        bSave.setText("保存当前位置");
+        btns.setPadding(dpPx(12), dpPx(12), dpPx(12), 0);
+
+        Button bSave = primaryButton("保存当前位置");
         bSave.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { promptSave(); }
         });
-        btns.addView(bSave);
-        Button bLoc = new Button(this);
-        bLoc.setText("定位到我的位置");
+        btns.addView(bSave, new LinearLayout.LayoutParams(0, dpPx(44), 1f));
+
+        Button bLoc = ghostButton("定位到我的位置");
         bLoc.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) { locateCurrent(); }
         });
-        btns.addView(bLoc);
+        LinearLayout.LayoutParams locLp = new LinearLayout.LayoutParams(0, dpPx(44), 1f);
+        locLp.leftMargin = dpPx(10);
+        btns.addView(bLoc, locLp);
 
-        // 虚拟定位开关
+        root.addView(btns);
+
+        // --- 开关卡片 ---
+        LinearLayout switchCard = new LinearLayout(this);
+        switchCard.setOrientation(LinearLayout.HORIZONTAL);
+        switchCard.setGravity(Gravity.CENTER_VERTICAL);
+        switchCard.setPadding(dpPx(16), dpPx(6), dpPx(16), dpPx(6));
+        switchCard.setBackground(rounded(COLOR_CARD, dpPx(12)));
+        LinearLayout.LayoutParams switchCardLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        switchCardLp.leftMargin = dpPx(12);
+        switchCardLp.rightMargin = dpPx(12);
+        switchCardLp.topMargin = dpPx(12);
+        root.addView(switchCard, switchCardLp);
+
+        TextView swLabel = new TextView(this);
+        swLabel.setText("启用虚拟定位");
+        swLabel.setTextSize(15);
+        swLabel.setTextColor(COLOR_TEXT_MAIN);
+        switchCard.addView(swLabel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
         final Switch sw = new Switch(this);
-        sw.setText("启用虚拟定位");
         sw.setChecked(isSwitchOn());
         sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             public void onCheckedChanged(CompoundButton b, boolean on) {
@@ -160,19 +229,29 @@ public class SettingsActivity extends Activity
                 toast("虚拟定位已" + (on ? "开启" : "关闭"));
             }
         });
-        btns.addView(sw);
-        root.addView(btns);
+        switchCard.addView(sw);
 
-        // 位置列表标题
+        // --- 位置列表标题 ---
         TextView tvList = new TextView(this);
-        tvList.setText("▸ 位置列表（点击切换，长按删除）");
-        tvList.setTextSize(13);
-        tvList.setPadding(dpPx(12), dpPx(12), dpPx(12), dpPx(4));
+        tvList.setText("位置列表");
+        tvList.setTextSize(15);
+        tvList.setTextColor(COLOR_TEXT_MAIN);
+        tvList.setTypeface(Typeface.DEFAULT_BOLD);
+        tvList.setPadding(dpPx(16), dpPx(16), dpPx(16), dpPx(4));
         root.addView(tvList);
 
-        // 列表容器（独立滚动的 ListView，不参与地图手势，避免拖拽/缩放冲突）
+        TextView tvListHint = new TextView(this);
+        tvListHint.setText("点击切换 · 长按删除");
+        tvListHint.setTextSize(12);
+        tvListHint.setTextColor(COLOR_TEXT_SUB);
+        tvListHint.setPadding(dpPx(16), 0, dpPx(16), dpPx(8));
+        root.addView(tvListHint);
+
+        // 列表容器（独立滚动的 ListView）
         mListView = new android.widget.ListView(this);
         mListView.setDivider(null);
+        mListView.setDividerHeight(dpPx(1));
+        mListView.setBackgroundColor(COLOR_CARD);
         mListAdapter = new android.widget.ArrayAdapter<String>(this, android.R.layout.simple_list_item_1);
         mListView.setAdapter(mListAdapter);
         mListView.setOnItemClickListener(new android.widget.AdapterView.OnItemClickListener() {
@@ -186,9 +265,13 @@ public class SettingsActivity extends Activity
                 return true;
             }
         });
-        // 让列表占满剩余空间并独立滚动
-        root.addView(mListView, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+        listLp.leftMargin = dpPx(12);
+        listLp.rightMargin = dpPx(12);
+        listLp.topMargin = dpPx(4);
+        listLp.bottomMargin = dpPx(12);
+        root.addView(mListView, listLp);
 
         refreshListView();
 
@@ -565,6 +648,46 @@ public class SettingsActivity extends Activity
 
     void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
     int dpPx(int dp) { return (int)(dp * getResources().getDisplayMetrics().density); }
+
+    /** 生成圆角背景 */
+    private GradientDrawable rounded(int color, float radius) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(radius);
+        return d;
+    }
+    private GradientDrawable rounded(int color, float topLeft, float topRight, float bottomRight, float bottomLeft) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadii(new float[]{topLeft, topLeft, topRight, topRight, bottomRight, bottomRight, bottomLeft, bottomLeft});
+        return d;
+    }
+
+    /** 生成主按钮（钉钉蓝、白字、圆角） */
+    private Button primaryButton(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextSize(15);
+        b.setTextColor(Color.WHITE);
+        b.setAllCaps(false);
+        b.setBackground(rounded(COLOR_PRIMARY, dpPx(8)));
+        return b;
+    }
+
+    /** 生成次按钮（透明底、蓝字、蓝边框） */
+    private Button ghostButton(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextSize(15);
+        b.setTextColor(COLOR_PRIMARY);
+        b.setAllCaps(false);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.TRANSPARENT);
+        bg.setCornerRadius(dpPx(8));
+        bg.setStroke(dpPx(1), COLOR_PRIMARY);
+        b.setBackground(bg);
+        return b;
+    }
 
     /**
      * 以 root 身份写 Settings.Global（rimet_* 键）。

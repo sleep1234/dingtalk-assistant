@@ -16,7 +16,8 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
 
     <application
-        android:label="钉钉助手-复活版"
+        android:label="钉钉助手-复活"
+        android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:usesCleartextTraffic="true">
 
@@ -33,7 +34,7 @@
 
         <activity
             android:name=".SettingsActivity"
-            android:label="钉钉助手-复活版"
+            android:label="钉钉助手-复活"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
