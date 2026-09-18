@@ -16,11 +16,8 @@ import de.robv.android.xposed.XSharedPreferences;
  *   业务层 → LocationProxy(门面) → AMapLocationClient(高德SDK)
  *         → 阿里安全AOP插桩监控 → 定位结果通过回调分发
  *
- * 坐标/开关读取优先级（从高到低）：
- *   1. Settings.Global 的 rimet_* 键（root 可写、跨进程免权限，避开 HyperOS 白名单）
- *   2. XSharedPreferences（LSPosed 共享）
- *   3. 公共文件 /sdcard/rimet_location.txt
- *   4. 默认值（台州市政府）
+ * 坐标/开关通过公共文件 /data/local/tmp/rimet_location.txt 传递：
+ *   模块界面通过 root 写入，钉钉进程直接读取，支持 mtime 热重载无需重启
  */
 public class LocationHook {
 

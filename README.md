@@ -15,24 +15,23 @@
 
 ## 功能详情
 
-### 1. 虚拟定位（`LocationHook`）
+### 1. 虚拟定位（`LocationHook` v6）
 
 - **结果层拦截**：hook `AMapLocation.getLatitude/getLongitude`，直接返回值改写，任何遗漏的调用方都无法绕过
-- **门面层拦截**：hook 钉钉自研 `LocationProxy.onLocationChanged()`（钉钉所有定位请求的统一入口），在此拦截坐标影响所有下游观察者
+- **门面层拦截**：hook 钉钉自研 `LocationProxy.onLocationChanged()`（钉钉所有定位请求的统一入口）
 - **监听器代理**：hook `AMapLocationClient.setLocationListener`，用动态代理包裹 listener 原地改写坐标
 - **缓存绕过**：hook `AMapLocationClient.getLastKnownLocation` / `LocationManager.getLastKnownLocation`，强制返回 `null` 逼迫重新定位
 - **兜底通道**：hook 系统 `LocationManager.requestLocationUpdates`（含 Looper 重载），代理系统 `LocationListener`（WGS-84）
 - **热重载**：位置切换后通过文件 mtime 检测自动重载坐标，**无需重启钉钉**
+- **逆地理编码**：拖动地图后自动获取当前地址，保存位置时可复用地址作为名称
 
-**坐标/开关读取优先级**（从高到低）：
+**坐标/开关读取通道**：
 
-1. 公共文件 `/data/local/tmp/rimet_location.txt`（`key=value` 行格式，由模块界面通过 root 写入）
-2. `XSharedPreferences`（shared_prefs 名为 `location`）
-3. 默认值：台州市政府（椒江区）`28.6557, 121.4200`
+模块界面通过 `su -c` root 写入公共文件 `/data/local/tmp/rimet_location.txt`（`key=value` 行格式），钉钉进程通过文件 mtime 检测实时读取，实现跨进程热重载。
 
-> **v6 改进说明**：原 v4 版本的 `Settings.System` 和 `Settings.Global` 通道在 Android 14（HyperOS）上均被系统权限校验拦截（`Package android does not belong to uid 10412`），`/sdcard/rimet_location.txt` 被 Scoped Storage 拒绝。v6 改用 `/data/local/tmp/rimet_location.txt`（所有进程可读的公共目录），通过模块界面的 `su -c` root 写入，钉钉进程直接读取，同时加入 mtime 热重载机制。
+**开关**：「启用虚拟定位」开关通过 `sed` 更新公共文件的 `enabled` 键，钉钉进程热重载即时生效，无需重启。
 
-**开关**：模块界面「启用虚拟定位」开关控制总闸，关闭后钉钉读取真实位置。开关状态也通过公共文件传递，热重载即时生效。
+> **v6 架构说明**：原 `Settings.System`/`Settings.Global` 通道在 Android 14（HyperOS）上被权限校验拦截，`/sdcard/` 被 Scoped Storage 拒绝。v6 统一走 `/data/local/tmp/rimet_location.txt`（所有进程可读的公共目录），开关和坐标使用同一通道，代码审查中已清理所有失效通道。
 
 ### 2. 防撤回（`RecallHook`，针对钉钉 8.x 混淆）
 
@@ -71,11 +70,11 @@
 
 ### 使用虚拟定位
 
-1. 桌面打开「钉钉助手-复活」（模块自带界面 `SettingsActivity`）
-2. 拖动地图或点「定位到我的位置」选点（坐标系自动按 GCJ-02 处理）
-3. 点「保存当前位置」并给位置起名 → 坐标通过 root 写入公共文件，钉钉热重载后立即生效
+1. 桌面打开「钉钉助手-复活」（模块自带界面 `SettingsActivity`，沉浸式状态栏 + 钉钉蓝主题）
+2. 拖动地图选点，自动显示逆编码地址（高德 Web 服务 API）
+3. 点「保存当前位置」→ 输入框默认填入逆编码地址 → 坐标通过 root 写入公共文件
 4. 位置列表支持：**点击**切换（热重载，无需重启钉钉）、**长按**删除
-5. 「启用虚拟定位」开关控制总闸：开关状态也通过公共文件传递，关闭后钉钉立即读取真实位置
+5. 「启用虚拟定位」开关控制总闸，关闭后钉钉立即读取真实位置
 6. 保存/切换后**无需重启钉钉**（热重载自动检测文件变化）
 
 ### 免地图的纯命令行方式

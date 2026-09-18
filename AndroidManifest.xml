@@ -24,7 +24,7 @@
         <!-- 高德地图 Android key（注意：该 key 已随仓库公开，建议替换为自己的 key，并在高德开放平台配置 SHA1 签名） -->
         <meta-data
             android:name="com.amap.api.v2.apikey"
-            android:value="6528e2dca132967d339e407699815a8d"/>
+            android:value="aa2252ec1899d2284d514c19d0f7677e"/>
 
         <provider
             android:name=".LocProvider"

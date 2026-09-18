@@ -16,9 +16,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.util.Log;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -37,6 +37,11 @@ import com.amap.api.maps.model.CameraPosition;
 import com.amap.api.maps.model.LatLng;
 import com.amap.api.maps.model.Marker;
 import com.amap.api.maps.model.MarkerOptions;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -47,17 +52,17 @@ public class SettingsActivity extends Activity
         implements AMap.OnCameraChangeListener, AMap.OnMarkerDragListener {
 
     private static final String TAG = "RimetHook-Map";
-    // 高德地图 Android key（与 AndroidManifest.xml 中的 com.amap.api.v2.apikey 保持一致）
-    private static final String AMAP_KEY = "6528e2dca132967d339e407699815a8d";
+    // 高德地图 Android key（地图 SDK 用，需要 SHA1 签名校验）
+    private static final String AMAP_ANDROID_KEY = "aa2252ec1899d2284d514c19d0f7677e";
+    // 高德 Web 服务 Key（逆编码用，不依赖 SHA1 签名校验）
+    private static final String AMAP_WEB_KEY = "1d0d90f9061bf9d9587de84919c09afe";
 
     // 主题色：钉钉蓝
     private static final int COLOR_PRIMARY = 0xFF0089FF;
-    private static final int COLOR_PRIMARY_DARK = 0xFF0066CC;
     private static final int COLOR_BG = 0xFFF5F6F8;
     private static final int COLOR_CARD = 0xFFFFFFFF;
     private static final int COLOR_TEXT_MAIN = 0xFF1F2329;
     private static final int COLOR_TEXT_SUB = 0xFF86909C;
-    private static final int COLOR_DIVIDER = 0xFFE5E6EB;
 
     private MapView mMapView;
     private AMap mAMap;
@@ -66,7 +71,8 @@ public class SettingsActivity extends Activity
     private TextView mTvInfo;
     private SharedPreferences mPrefs;
     private android.widget.ListView mListView;
-    private android.widget.ArrayAdapter<String> mListAdapter;
+    private android.widget.BaseAdapter mListAdapter;
+    private String mCurAddr = "";   // 逆编码得到的当前地址
 
     double mLat = 28.6557, mLng = 121.4200;
     String mAddr = "";
@@ -87,13 +93,23 @@ public class SettingsActivity extends Activity
         if (ab != null) ab.hide();
         setTitle(null);
 
+        // 状态栏沉浸：状态栏与标题栏同色（钉钉蓝），内容延伸到状态栏下方
+        if (Build.VERSION.SDK_INT >= 21) {
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
+            getWindow().setStatusBarColor(COLOR_PRIMARY);
+            getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+        }
+
         requestLocationPermission();
 
         try {
             MapsInitializer.sdcardDir = getFilesDir().getAbsolutePath();
             // 高德 SDK 从 AndroidManifest.xml 的 <meta-data com.amap.api.v2.apikey> 读取 key，
             // setApiKey 只是显式再确认一次（某些离线构建场景有用）
-            MapsInitializer.setApiKey(AMAP_KEY);
+            MapsInitializer.setApiKey(AMAP_ANDROID_KEY);
             MapsInitializer.initialize(this);
         } catch (Throwable t) { Log.e(TAG, "地图初始化失败", t); }
 
@@ -118,23 +134,24 @@ public class SettingsActivity extends Activity
         // --- 顶部标题栏（渐变蓝底） ---
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
-        header.setPadding(dpPx(20), dpPx(20), dpPx(20), dpPx(18));
+        // 顶部留出状态栏高度，避免标题被状态栏遮挡（减少标题栏垂直间距，为列表留空间）
+        header.setPadding(dpPx(20), getStatusBarHeight() + dpPx(10), dpPx(20), dpPx(10));
         header.setBackground(rounded(COLOR_PRIMARY, 0, 0, dpPx(24), dpPx(24)));
 
         TextView tvTitle = new TextView(this);
         tvTitle.setText("钉钉助手-复活");
-        tvTitle.setTextSize(24);
+        tvTitle.setTextSize(20);
         tvTitle.setTextColor(Color.WHITE);
         tvTitle.setTypeface(Typeface.DEFAULT_BOLD);
         header.addView(tvTitle);
 
         TextView tvSubtitle = new TextView(this);
         tvSubtitle.setText("虚拟定位 · 防撤回 · 安全绕过");
-        tvSubtitle.setTextSize(13);
+        tvSubtitle.setTextSize(12);
         tvSubtitle.setTextColor(0xB3FFFFFF);
         LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        subLp.topMargin = dpPx(4);
+        subLp.topMargin = dpPx(2);
         header.addView(tvSubtitle, subLp);
 
         root.addView(header);
@@ -158,13 +175,13 @@ public class SettingsActivity extends Activity
         mMapView = new MapView(this);
         mMapView.onCreate(savedInstanceState);
         mapWrap.addView(mMapView, new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, dpPx(300)));
+            FrameLayout.LayoutParams.MATCH_PARENT, dpPx(220)));
         mapWrap.setBackground(rounded(COLOR_CARD, dpPx(12)));
         LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dpPx(300));
+            LinearLayout.LayoutParams.MATCH_PARENT, dpPx(220));
         mapLp.leftMargin = dpPx(12);
         mapLp.rightMargin = dpPx(12);
-        mapLp.topMargin = dpPx(12);
+        mapLp.topMargin = dpPx(8);
         root.addView(mapWrap, mapLp);
 
         // --- 信息栏（当前坐标） ---
@@ -247,12 +264,40 @@ public class SettingsActivity extends Activity
         tvListHint.setPadding(dpPx(16), 0, dpPx(16), dpPx(8));
         root.addView(tvListHint);
 
-        // 列表容器（独立滚动的 ListView）
+        // 列表容器（独立滚动的 ListView，自定义适配器缩小字号+分割线）
         mListView = new android.widget.ListView(this);
         mListView.setDivider(null);
-        mListView.setDividerHeight(dpPx(1));
         mListView.setBackgroundColor(COLOR_CARD);
-        mListAdapter = new android.widget.ArrayAdapter<String>(this, android.R.layout.simple_list_item_1);
+        final int itemPadH = dpPx(16);
+        final int itemPadV = dpPx(11);
+        mListAdapter = new android.widget.BaseAdapter() {
+            @Override public int getCount() { return mLocList.size(); }
+            @Override public Object getItem(int i) { return mLocList.get(i); }
+            @Override public long getItemId(int i) { return i; }
+            @Override
+            public View getView(int i, View v, ViewGroup parent) {
+                LinearLayout item = new LinearLayout(SettingsActivity.this);
+                item.setOrientation(LinearLayout.VERTICAL);
+                item.setPadding(itemPadH, itemPadV, itemPadH, itemPadV);
+                item.setBackgroundColor(COLOR_CARD);
+
+                TextView tv = new TextView(SettingsActivity.this);
+                tv.setTextSize(13);
+                tv.setTextColor(COLOR_TEXT_MAIN);
+                LocItem it = mLocList.get(i);
+                tv.setText(it.addr + "  ·  " + String.format("%.4f, %.4f", it.lat, it.lng));
+                item.addView(tv);
+
+                // 分割线
+                View divider = new View(SettingsActivity.this);
+                divider.setBackgroundColor(0xFFE0E0E0);
+                LinearLayout.LayoutParams dp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dpPx(1));
+                item.addView(divider, dp);
+
+                return item;
+            }
+        };
         mListView.setAdapter(mListAdapter);
         mListView.setOnItemClickListener(new android.widget.AdapterView.OnItemClickListener() {
             public void onItemClick(android.widget.AdapterView<?> parent, android.view.View view, int position, long id) {
@@ -316,20 +361,70 @@ public class SettingsActivity extends Activity
                 .title("选点").draggable(true));
         }
         updateText();
+        doRegeocode(mLat, mLng);
     }
     @Override public void onMarkerDrag(Marker m) {}
     @Override public void onMarkerDragEnd(Marker m) {
-        // 只有蓝色选点标点可拖动
         if (m == mDraggingMarker) {
             LatLng p = m.getPosition();
             mLat = p.latitude; mLng = p.longitude;
             updateText();
+            doRegeocode(mLat, mLng);
         }
     }
     @Override public void onMarkerDragStart(Marker m) {}
 
     void updateText() {
-        mTvInfo.setText(String.format("当前: %.6f, %.6f  %s", mLat, mLng, mAddr.isEmpty() ? "" : "(" + mAddr + ")"));
+        String addrPart = mCurAddr.isEmpty() ? (mAddr.isEmpty() ? "" : mAddr) : mCurAddr;
+        mTvInfo.setText(String.format("%.6f, %.6f\n%s", mLat, mLng, addrPart));
+    }
+
+    /** 逆编码查询当前坐标的地址（HTTP 方式，绕过签名校验） */
+    private void doRegeocode(final double lat, final double lng) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                HttpURLConnection conn = null;
+                try {
+                    String location = lng + "," + lat;
+                    String url = "https://restapi.amap.com/v3/geocode/regeo?key=" + AMAP_WEB_KEY
+                        + "&location=" + URLEncoder.encode(location, "UTF-8")
+                        + "&output=json&radius=1000&extensions=base";
+                    conn = (HttpURLConnection) new URL(url).openConnection();
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(8000);
+                    conn.setReadTimeout(8000);
+
+                    BufferedReader br = new BufferedReader(
+                        new InputStreamReader(conn.getInputStream(), "UTF-8"));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = br.readLine()) != null) sb.append(line);
+                    br.close();
+
+                    JSONObject json = new JSONObject(sb.toString());
+                    if ("1".equals(json.optString("status"))) {
+                        JSONObject regeo = json.optJSONObject("regeocode");
+                        if (regeo != null) {
+                            String addr = regeo.optString("formatted_address");
+                            if (addr != null && !addr.isEmpty()) {
+                                mCurAddr = addr;
+                                Log.i(TAG, "逆编码地址: " + addr);
+                                runOnUiThread(new Runnable() {
+                                    @Override public void run() { updateText(); }
+                                });
+                            }
+                        }
+                    } else {
+                        Log.w(TAG, "逆编码失败: " + json.optString("info"));
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "逆编码异常: " + t.getMessage());
+                } finally {
+                    if (conn != null) conn.disconnect();
+                }
+            }
+        }).start();
     }
 
     // ====== 定位 ======
@@ -389,13 +484,17 @@ public class SettingsActivity extends Activity
         b.setTitle("给这个位置起个名字");
         final EditText input = new EditText(this);
         input.setHint("例如：台州市中心医院、公司、家");
-        input.setText(mAddr.isEmpty() ? String.format("%.4f,%.4f", mLat, mLng) : mAddr);
+        // 优先复用逆编码得到的地址，其次用已保存名称，最后用坐标
+        String defaultName = mCurAddr;
+        if (defaultName == null || defaultName.isEmpty()) defaultName = mAddr;
+        if (defaultName == null || defaultName.isEmpty()) defaultName = String.format("%.4f,%.4f", mLat, mLng);
+        input.setText(defaultName);
         input.setInputType(InputType.TYPE_CLASS_TEXT);
         b.setView(input);
         b.setPositiveButton("保存", new DialogInterface.OnClickListener() {
             public void onClick(DialogInterface d, int w) {
                 String name = input.getText().toString().trim();
-                if (name.isEmpty()) name = String.format("%.4f,%.4f", mLat, mLng);
+                if (name.isEmpty()) name = mCurAddr.isEmpty() ? String.format("%.4f,%.4f", mLat, mLng) : mCurAddr;
                 mAddr = name;
                 saveLocation(name);
             }
@@ -431,16 +530,20 @@ public class SettingsActivity extends Activity
         refreshListView();
     }
 
-    /** 通过 root 写 /data/local/tmp/rimet_location.txt，钉钉 LocationHook 直接读取 */
+    /**
+     * 通过 root 写 /data/local/tmp/rimet_location.txt，钉钉 LocationHook 直接读取。
+     * enabled 键保留文件中原有的值（不覆盖），若文件不存在则默认 enabled=1。
+     */
     private void writePublicFile(double[] wgs, double gcjLat, double gcjLng, String addr) {
         try {
-            String cmd = "echo enabled=1 > " + PUBLIC_FILE
-                + "; echo lat=" + (float) wgs[0] + " >> " + PUBLIC_FILE
-                + "; echo lng=" + (float) wgs[1] + " >> " + PUBLIC_FILE
-                + "; echo lat_gcj=" + gcjLat + " >> " + PUBLIC_FILE
-                + "; echo lng_gcj=" + gcjLng + " >> " + PUBLIC_FILE
-                + "; echo addr=" + addr + " >> " + PUBLIC_FILE
-                + "; chmod 644 " + PUBLIC_FILE;
+            // 先尝试用 sed 原地更新已有的坐标行（不覆盖 enabled）
+            String sedLatGcj = "sed -i '/^lat_gcj=/c\\lat_gcj=" + gcjLat + "' " + PUBLIC_FILE;
+            String sedLngGcj = "sed -i '/^lng_gcj=/c\\lng_gcj=" + gcjLng + "' " + PUBLIC_FILE;
+            String sedLat = "sed -i '/^lat=/c\\lat=" + (float) wgs[0] + "' " + PUBLIC_FILE;
+            String sedLng = "sed -i '/^lng=/c\\lng=" + (float) wgs[1] + "' " + PUBLIC_FILE;
+            String sedAddr = "sed -i '/^addr=/c\\addr=" + addr + "' " + PUBLIC_FILE;
+            String cmd = "if [ ! -f " + PUBLIC_FILE + " ]; then echo enabled=1 > " + PUBLIC_FILE + "; fi" 
+                + "; " + sedLatGcj + "; " + sedLngGcj + "; " + sedLat + "; " + sedLng + "; " + sedAddr;
             Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
             p.waitFor();
             Log.i(TAG, "公共定位文件已写入: " + PUBLIC_FILE);
@@ -512,12 +615,6 @@ public class SettingsActivity extends Activity
     }
 
     void refreshListView() {
-        java.util.List<String> labels = new java.util.ArrayList<>();
-        for (LocItem it : mLocList) {
-            labels.add(it.addr + "  [" + String.format("%.4f,%.4f", it.lat, it.lng) + "]");
-        }
-        mListAdapter.clear();
-        mListAdapter.addAll(labels);
         mListAdapter.notifyDataSetChanged();
     }
 
@@ -585,7 +682,12 @@ public class SettingsActivity extends Activity
     void setSwitchOn(final boolean on) {
         mPrefs.edit().putBoolean("enabled", on).commit();
         fixPrefsPermission();
-        writeSystemSetting("rimet_enabled", on ? "1" : "0");
+        // 更新公共文件的 enabled 键（钉钉 LocationHook 读取此键控制开关）
+        try {
+            Process p = Runtime.getRuntime().exec(
+                new String[]{"su", "-c", "sed -i 's/^enabled=.*/enabled=" + (on ? "1" : "0") + "/' " + PUBLIC_FILE});
+            p.waitFor();
+        } catch (Throwable ignored) {}
     }
 
     // ====== 坐标系转换 ======
@@ -649,6 +751,16 @@ public class SettingsActivity extends Activity
     void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
     int dpPx(int dp) { return (int)(dp * getResources().getDisplayMetrics().density); }
 
+    /** 获取状态栏高度（px） */
+    private int getStatusBarHeight() {
+        int result = 0;
+        int resourceId = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        if (resourceId > 0) {
+            result = getResources().getDimensionPixelSize(resourceId);
+        }
+        return result;
+    }
+
     /** 生成圆角背景 */
     private GradientDrawable rounded(int color, float radius) {
         GradientDrawable d = new GradientDrawable();
@@ -687,22 +799,6 @@ public class SettingsActivity extends Activity
         bg.setStroke(dpPx(1), COLOR_PRIMARY);
         b.setBackground(bg);
         return b;
-    }
-
-    /**
-     * 以 root 身份写 Settings.Global（rimet_* 键）。
-     * 用 Global 而非 System，避开 HyperOS 对 Settings.System 的 PUBLIC_SETTINGS 白名单限制。
-     * 通过 `su -c settings put global ...` 执行。设备需已 root（Magisk）。
-     */
-    private void writeSystemSetting(String key, String value) {
-        try {
-            Process p = Runtime.getRuntime().exec(
-                new String[]{"su", "-c", "settings put global " + key + " " + value});
-            p.waitFor();
-            Log.i(TAG, "Settings.Global " + key + "=" + value + " 写入完成");
-        } catch (Throwable t) {
-            Log.e(TAG, "写 Settings.Global 失败: " + key, t);
-        }
     }
 
     @Override protected void onResume() { super.onResume(); mMapView.onResume(); }
