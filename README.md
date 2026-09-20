@@ -10,7 +10,7 @@
 
 - 包名：`com.sky.xposed.rimet`（当前版本 8.4 / versionCode 103）
 - 作者：毛利老王
-- 适配钉钉 8.x 混淆版本（`v9h` / `x6h`），Xposed 最小版本 82
+- 适配钉钉 8.3.20 混淆版本（`v9h` / `x6h` / `z6h`），Xposed 最小版本 82
 - 仅作用于钉钉进程，不影响其他应用
 
 ## 功能详情
@@ -22,33 +22,40 @@
 - **监听器代理**：hook `AMapLocationClient.setLocationListener`，用动态代理包裹 listener 原地改写坐标
 - **缓存绕过**：hook `AMapLocationClient.getLastKnownLocation` / `LocationManager.getLastKnownLocation`，强制返回 `null` 逼迫重新定位
 - **兜底通道**：hook 系统 `LocationManager.requestLocationUpdates`（含 Looper 重载），代理系统 `LocationListener`（WGS-84）
-- **热重载**：位置切换后通过文件 mtime 检测自动重载坐标，**无需重启钉钉**
+- **热重载**：位置切换后通过文件 mtime + 内容快照双保险自动重载坐标，**无需重启钉钉**
 - **逆地理编码**：拖动地图后自动获取当前地址，保存位置时可复用地址作为名称
 
 **坐标/开关读取通道**：
 
-模块界面通过 `su -c` root 写入公共文件 `/data/local/tmp/rimet_location.txt`（`key=value` 行格式），钉钉进程通过文件 mtime 检测实时读取，实现跨进程热重载。
+模块界面通过 `su -c` root 写入公共文件 `/data/local/tmp/rimet_location.txt`（`key=value` 行格式），钉钉进程通过文件 mtime + 内容快照双保险检测实时读取，实现跨进程热重载。
 
 **开关**：「启用虚拟定位」开关通过 `sed` 更新公共文件的 `enabled` 键，钉钉进程热重载即时生效，无需重启。
 
 > **v6 架构说明**：原 `Settings.System`/`Settings.Global` 通道在 Android 14（HyperOS）上被权限校验拦截，`/sdcard/` 被 Scoped Storage 拒绝。v6 统一走 `/data/local/tmp/rimet_location.txt`（所有进程可读的公共目录），开关和坐标使用同一通道，代码审查中已清理所有失效通道。
+>
+> **热重载双保险**：原 v6 仅依赖文件 mtime 检测变化，在坐标快速连续切换时可能因文件系统秒级 mtime 精度而漏检。已升级为 mtime + 文件内容快照双保险，同时缩短坐标缓存窗口（5s → 500ms），确保每次定位请求都能读取最新坐标。
 
-### 2. 防撤回（`RecallHook`，针对钉钉 8.x 混淆）
+### 2. 防撤回（`RecallHook`，针对钉钉 8.3.20 混淆）
 
 | 混淆类 | 对应功能 |
 | --- | --- |
 | `v9h.K(String, long, Callback)` | 单条撤回 RPC |
 | `v9h.J(String, List, int, Callback)` | 批量撤回 RPC |
-| `x6h` | 消息数据源（`MessageDs`） |
-| `x6h.c(String, Collection, boolean)` | 消息处理 handler |
-| `x6h.T(String, String, List)` | 消息 update 写库 |
+| `x6h extends IMDatabase` | 消息数据源基类（含 final `T` 方法） |
+| `z6h extends x6h` | 消息数据源单例实现（`z6h.W()` 获取实例） |
+| `z6h.c(String, Collection, boolean)` | 消息处理 handler（override 自 `x6h`） |
+| `x6h.T(String, String, List)` | 消息 update 写库（`public final`，`z6h` 继承） |
 
 工作逻辑：
 
 1. 拦截 `v9h` 的两个撤回 RPC，直接 `setResult(null)`，撤回请求不发出
-2. hook `x6h.c` 消息处理流程，检测到撤回通知（type=126）时，找到被撤回的文本消息（type=10），把内容改为 `原文 [已撤回]` 并写回数据库
+2. hook `z6h.c` 消息处理流程，检测到撤回通知（type=126）时，找到被撤回的文本消息（type=10），把内容改为 `原文 [已撤回]` 并写回数据库
 
-> **v6 修复**：原 v4 版本中混淆类名缺少 `defpackage.` 前缀（`v9h` → `defpackage.v9h`），导致防撤回功能完全失效。此外 `getWritableDatabase()` 强制返回类型转换和 `callStaticMethod` 调用实例方法的问题也已修复。
+> **类名注意事项**：这些类在默认包（无 package 声明）中，二进制类名就是 `v9h`/`x6h`/`z6h`，**不要加 `defpackage.` 前缀**。`defpackage` 是 jadx 为了在 Java 中显示默认包类而虚构的包名，`XposedHelpers.findClass` 不需要它，加了反而会导致 `ClassNotFoundException`。
+>
+> **c 方法必须 hook `z6h`**：`c` 方法在 `z6h` 中被 override，实际运行时走的都是 `z6h.c`，hook `x6h.c` 无法拦截消息处理。
+>
+> **`T` 方法通过 `z6h.W()` 获取实例**：`T` 是 `x6h` 的 `public final` 方法（不可 override），但它是实例方法，需要 `z6h.W()` 获取单例后调用。原 `getInstance()` 和 `callStaticMethod` 均不存在。
 
 ### 3. 安全检测绕过（`SafetyCheckHook`）
 
@@ -152,12 +159,13 @@ com.sky.xposed.rimet.Main
 ├── src/com/sky/xposed/rimet/
 │   ├── Main.java              # IXposedHookLoadPackage 入口，仅加载钉钉时安装 hook
 │   ├── LocationHook.java      # 虚拟定位（v6：公共文件 + 热重载 + 多层拦截）
-│   ├── RecallHook.java        # 防撤回（8.x 混淆 v9h / x6h）
+│   ├── RecallHook.java        # 防撤回（8.3.20 混淆 v9h / x6h / z6h）
 │   ├── SafetyCheckHook.java   # root / 开发者选项 / 调试检测绕过
 │   ├── LocProvider.java       # ContentProvider，对外暴露定位坐标
 │   └── SettingsActivity.java  # 模块设置界面（现代化 UI：卡片式 + 钉钉蓝主题）
 ├── lib/                       # 编译期依赖 jar（不打包进 APK）
-└── build/                     # 各 API 级别构建产物
+├── build/                     # 各 API 级别构建产物
+└── verify_hook.js             # Frida 动态验证脚本（定位链路验证）
 ```
 
 ## 日志
