@@ -32,7 +32,7 @@ public class LocationHook {
     private static final String KEY_LNG = "lng";
     private static final String KEY_ENABLED = "enabled";
 
-    private static final long CACHE_MS = 5000L;
+    private static final long CACHE_MS = 500L;
 
     private static boolean sEnabledCache = true;
     private static long sEnabledCacheTs;
@@ -45,6 +45,7 @@ public class LocationHook {
     private static XSharedPreferences sPrefs;
     private static java.util.Map<String, String> sFilePrefs;
     private static long sFileLastModified;
+    private static String sFileContentSnapshot = "";
 
     // 公共定位文件，放在 /data/local/tmp 下避免 Android 14 Scoped Storage 限制
     private static final String PUBLIC_FILE = "/data/local/tmp/rimet_location.txt";
@@ -405,15 +406,10 @@ public class LocationHook {
         try {
             java.io.File f = new java.io.File(PUBLIC_FILE);
             if (f.canRead()) {
+                String content = readFileContent(f);
                 sFileLastModified = f.lastModified();
-                java.io.BufferedReader br = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
-                String line;
-                while ((line = br.readLine()) != null) {
-                    int idx = line.indexOf('=');
-                    if (idx > 0) m.put(line.substring(0, idx).trim(), line.substring(idx + 1).trim());
-                }
-                br.close();
+                sFileContentSnapshot = content;
+                m = parseFileContent(content);
                 Log.i(TAG, "公共定位配置已加载: " + m);
             } else {
                 Log.w(TAG, PUBLIC_FILE + " 不可读，使用默认坐标");
@@ -428,12 +424,46 @@ public class LocationHook {
     private static void reloadIfChanged() {
         try {
             java.io.File f = new java.io.File(PUBLIC_FILE);
-            if (f.canRead() && f.lastModified() != sFileLastModified) {
-                sFilePrefs = loadFilePrefs();
+            if (!f.canRead()) return;
+            // 用 mtime + 内容双保险：mtime 可能因秒级精度在快速连续切换时相同，
+            // 因此同时对比内容快照，确保任何变化都能被检测到
+            long mtime = f.lastModified();
+            String snapshot = readFileContent(f);
+            if (mtime != sFileLastModified || !snapshot.equals(sFileContentSnapshot)) {
+                sFilePrefs = parseFileContent(snapshot);
+                sFileLastModified = mtime;
+                sFileContentSnapshot = snapshot;
                 sCoordCacheTs = 0;  // 强制刷新坐标缓存
                 sEnabledCacheTs = 0;  // 强制刷新开关缓存
-                Log.i(TAG, "检测到定位配置变化，已热重载");
+                Log.i(TAG, "检测到定位配置变化，已热重载: " + sFilePrefs);
             }
         } catch (Throwable ignored) {}
+    }
+
+    private static String readFileContent(java.io.File f) {
+        try {
+            java.io.BufferedReader br = new java.io.BufferedReader(
+                new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            br.close();
+            return sb.toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static java.util.Map<String, String> parseFileContent(String content) {
+        java.util.Map<String, String> m = new java.util.HashMap<>();
+        try {
+            for (String line : content.split("\n")) {
+                int idx = line.indexOf('=');
+                if (idx > 0) m.put(line.substring(0, idx).trim(), line.substring(idx + 1).trim());
+            }
+        } catch (Throwable ignored) {}
+        return m;
     }
 }

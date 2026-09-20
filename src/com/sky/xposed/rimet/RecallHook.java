@@ -13,10 +13,11 @@ import de.robv.android.xposed.XposedHelpers;
 /**
  * 钉钉 8.x 防撤回 Hook
  * 
- * 新版混淆映射 (8.x):
- *   MessageDs        → defpackage/x6h (继承 IMDatabase)
- *   handler 方法      → x6h.c(String, Collection, boolean)
- *   update 方法       → x6h.T(String, String, List)
+ * 新版混淆映射 (8.3.20，实际 smali 类名，无 defpackage 前缀):
+ *   MessageDs 基类    → x6h (继承 IMDatabase)
+ *   MessageDs 实现    → z6h (继承 x6h，单例 z6h.W())
+ *   handler 方法      → z6h.c(String, Collection, boolean)  [override]
+ *   update 方法       → x6h.T(String, String, List)  [final，继承自基类]
  *   撤回 RPC (单条)   → v9h.K(String cid, long mid, Callback)
  *   撤回 RPC (批量)   → v9h.J(String cid, List mids, int recallType, Callback)
  */
@@ -28,8 +29,11 @@ public class RecallHook {
     private static final int MSG_TYPE_TEXT = 10;
 
     // 钉钉 8.x 混淆类名（随钉钉版本变化，升级后需重新分析）
-    private static final String CLS_RECALL_RPC = "defpackage.v9h";
-    private static final String CLS_MESSAGE_DS = "defpackage.x6h";
+    // 注意：这些类在默认包中，二进制类名就是 v9h/x6h，不加 "defpackage." 前缀
+    // defpackage 是 jadx 为显示默认包类虚构的包名，XposedHelpers.findClass 不需要它
+    private static final String CLS_RECALL_RPC = "v9h";
+    private static final String CLS_MESSAGE_DS = "x6h";       // 基类（含 final T 方法）
+    private static final String CLS_MESSAGE_DS_IMPL = "z6h";  // 单例实现（override c 方法）
     private static final String CLS_WUKONG_CALLBACK = "com.alibaba.wukong.Callback";
     private static final String CLS_IM_DATABASE = "com.alibaba.wukong.im.base.IMDatabase";
 
@@ -87,14 +91,15 @@ public class RecallHook {
     }
 
     /**
-     * Hook MessageDs.handler (x6h.c) 来检测撤回通知消息
+     * Hook MessageDs.handler (z6h.c) 来检测撤回通知消息
      * 当检测到 type=126 的撤回通知时，把被撤回的文本消息标记 "[已撤回]"
      */
     private static void hookMessageHandler(ClassLoader cl) {
         try {
-            Class<?> messageDs = XposedHelpers.findClass(CLS_MESSAGE_DS, sClassLoader);
+            // c 方法在 z6h 中被 override，所以必须 hook z6h 而非 x6h
+            Class<?> messageDs = XposedHelpers.findClass(CLS_MESSAGE_DS_IMPL, sClassLoader);
 
-            // x6h.c(String cid, Collection<MessageImpl> messages, boolean)
+            // z6h.c(String cid, Collection<MessageImpl> messages, boolean)
             XposedHelpers.findAndHookMethod(messageDs, "c",
                 String.class, Collection.class, boolean.class,
                 new XC_MethodHook() {
@@ -145,28 +150,18 @@ public class RecallHook {
             // 追加 "[已撤回]" 标记
             setMessageText(latestMsg, text + " [已撤回]");
 
-            // 更新到数据库: x6h.T(String dbName, String cid, List msgList)
+// 更新到数据库: x6h.T(String dbName, String cid, List msgList)
             try {
                 Class<?> imDatabase = XposedHelpers.findClass(CLS_IM_DATABASE, sClassLoader);
-// 获取数据库名字符串（IMDatabase.getWritableDatabase() 返回数据库路径/名称）
-                    Object dbName = XposedHelpers.callStaticMethod(
-                        imDatabase, "getWritableDatabase");
-                    if (dbName == null) return;
+                Object dbName = XposedHelpers.callStaticMethod(
+                    imDatabase, "getWritableDatabase");
+                if (dbName == null) return;
 
-// x6h.T(String dbName, String cid, List msgList) 是实例方法
-                    Class<?> x6hCls = XposedHelpers.findClass(CLS_MESSAGE_DS, sClassLoader);
-                    // 需要获取 x6h 的实例。MessageDs 是单例或全局对象，
-                    // 用 getDefaultInstance() 或通过调用 static getInstance() 获取。
-                    // 退一步：先用 callStaticMethod 尝试，失败则打日志。
-                    try {
-                        XposedHelpers.callStaticMethod(x6hCls, "T",
-                            dbName, cid, Collections.singletonList(latestMsg));
-                    } catch (NoSuchMethodError e) {
-                        // T 方法是实例方法，尝试通过静态 getInstance() 获取实例
-                        Object instance = XposedHelpers.callStaticMethod(x6hCls, "getInstance");
-                        XposedHelpers.callMethod(instance, "T",
-                            dbName, cid, Collections.singletonList(latestMsg));
-                    }
+                // z6h.W() 获取单例实例，调用继承的 final T 方法
+                Class<?> z6hCls = XposedHelpers.findClass(CLS_MESSAGE_DS_IMPL, sClassLoader);
+                Object instance = XposedHelpers.callStaticMethod(z6hCls, "W");
+                XposedHelpers.callMethod(instance, "T",
+                    dbName, cid, Collections.singletonList(latestMsg));
 
             } catch (Throwable t) {
                 Log.w(TAG, "更新撤回消息到DB失败", t);
