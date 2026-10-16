@@ -9,8 +9,7 @@ import android.database.MatrixCursor;
 import android.net.Uri;
 
 /**
- * 对外暴露虚拟定位坐标，供目标应用（钉钉）的 Xposed hook 通过
- *  content://com.sky.xposed.rimet.loc/  读取。
+ * 保留用于模块内部兼容读取的定位 Provider。
  * 运行在模块应用自身进程，可正常读取被 HyperOS 隔离到 apexdata 的 shared_prefs。
  */
 public class LocProvider extends ContentProvider {

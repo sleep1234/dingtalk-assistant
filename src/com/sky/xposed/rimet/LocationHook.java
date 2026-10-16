@@ -1,16 +1,21 @@
 package com.sky.xposed.rimet;
 
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 import android.util.Log;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.XSharedPreferences;
 
 /**
- * 钉钉虚拟定位 Hook (v6) — 针对钉钉 8.3.20 逆向分析后改进
+ * 钉钉虚拟定位 Hook (v6) — 针对钉钉 9.0.2.2 逆向分析后改进
  *
  * 钉钉定位链路（逆向分析结果）：
  *   业务层 → LocationProxy(门面) → AMapLocationClient(高德SDK)
@@ -41,6 +46,8 @@ public class LocationHook {
     private static double sCachedLat = DEFAULT_LAT;
     private static double sCachedLng = DEFAULT_LNG;
     private static long sCoordCacheTs;
+    private static final Map<android.location.LocationListener, android.location.LocationListener>
+        sSystemListenerProxies = Collections.synchronizedMap(new WeakHashMap<android.location.LocationListener, android.location.LocationListener>());
 
     private static XSharedPreferences sPrefs;
     private static java.util.Map<String, String> sFilePrefs;
@@ -61,10 +68,13 @@ public class LocationHook {
             hookAMapLocationResult(cl);
             hookAMapClient(cl);
             hookLocationProxy(cl);
+            hookDtLocationFactories(cl);
+            hookLocationService(cl);
+            hookMockFlags(cl);
             hookSystemLocationManager(cl);
             hookLastKnownLocation(cl);
 
-            Log.i(TAG, "虚拟定位 Hook v6 安装成功 [钉钉 8.3.20 适配]");
+            Log.i(TAG, "虚拟定位 Hook v6 安装成功 [钉钉 9.0.2.2 适配]");
         } catch (Throwable t) {
             Log.e(TAG, "安装虚拟定位 Hook 失败", t);
         }
@@ -82,6 +92,7 @@ public class LocationHook {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (!isEnabled()) return;
+                        refreshCoords();
                         param.setResult(sCachedLatGcj);
                     }
                 });
@@ -91,6 +102,7 @@ public class LocationHook {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         if (!isEnabled()) return;
+                        refreshCoords();
                         param.setResult(sCachedLngGcj);
                     }
                 });
@@ -183,7 +195,7 @@ public class LocationHook {
                         Object listener = param.args[3];
                         if (listener != null && !Proxy.isProxyClass(listener.getClass())
                             && listener instanceof android.location.LocationListener) {
-                            param.args[3] = proxySystemListener(
+                            param.args[3] = wrapSystemListener(
                                 (android.location.LocationListener) listener);
                         }
                     }
@@ -201,8 +213,24 @@ public class LocationHook {
                             Object listener = param.args[3];
                             if (listener != null && !Proxy.isProxyClass(listener.getClass())
                                 && listener instanceof android.location.LocationListener) {
-                                param.args[3] = proxySystemListener(
+                                param.args[3] = wrapSystemListener(
                                     (android.location.LocationListener) listener);
+                            }
+                        }
+                    });
+            } catch (Throwable ignored) {}
+
+            try {
+                XposedHelpers.findAndHookMethod(mgrCls, "removeUpdates",
+                    "android.location.LocationListener",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Object listener = param.args[0];
+                            if (listener instanceof android.location.LocationListener) {
+                                android.location.LocationListener proxy = sSystemListenerProxies.get(
+                                    (android.location.LocationListener) listener);
+                                if (proxy != null) param.args[0] = proxy;
                             }
                         }
                     });
@@ -235,6 +263,160 @@ public class LocationHook {
     }
 
     // ============================================================
+    // 钉钉 9.x 定位服务和 DtLocation 结果层
+    // ============================================================
+    private static void hookDtLocationFactories(ClassLoader cl) {
+        try {
+            Class<?> dtLocation = XposedHelpers.findClass(
+                "com.alibaba.android.rimet.model.DtLocation", cl);
+            XC_MethodHook resultHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (isEnabled() && param.getResult() != null) {
+                        patchLocation(param.getResult(), true);
+                        clearMockFlags(param.getResult());
+                    }
+                }
+            };
+            XposedHelpers.findAndHookMethod(dtLocation, "fromAMapLocation",
+                "com.amap.api.location.AMapLocation",
+                "com.alibaba.android.rimet.LocationService$ServiceType",
+                resultHook);
+            XposedHelpers.findAndHookMethod(dtLocation, "fromLocation",
+                "android.location.Location",
+                "com.alibaba.android.rimet.LocationService$ServiceType",
+                resultHook);
+            Log.i(TAG, "hook DtLocation.fromAMapLocation/fromLocation 成功");
+        } catch (Throwable t) {
+            Log.w(TAG, "hook DtLocation 工厂失败: " + t.getMessage());
+        }
+    }
+
+    private static void hookLocationService(ClassLoader cl) {
+        boolean hooked = false;
+        try {
+            Class<?> service = XposedHelpers.findClass(
+                "com.alibaba.android.rimet.LocationService", cl);
+            XC_MethodHook directCallbackHook = new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (param.args.length > 4 && param.args[4] != null
+                            && !Proxy.isProxyClass(param.args[4].getClass())) {
+                        param.args[4] = proxyDtLocationCallback(param.args[4]);
+                    }
+                }
+            };
+            for (String method : LocationHookPolicy.DIRECT_SERVICE_METHODS) {
+                try {
+                    XposedHelpers.findAndHookMethod(service, method,
+                        "android.content.Context", String.class,
+                        "com.alibaba.android.rimet.LocationService$ServiceType",
+                        "defpackage.a7h",
+                        "com.alibaba.android.rimet.DtLocationCallback", directCallbackHook);
+                    hooked = true;
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "hook LocationService 门面失败: " + t.getMessage());
+        }
+
+        for (String className : LocationHookPolicy.IMPLEMENTATION_CLASSES) {
+            try {
+                Class<?> implementation = XposedHelpers.findClass(className, cl);
+                for (String method : LocationHookPolicy.IMPLEMENTATION_METHODS) {
+                    if (!XposedBridge.hookAllMethods(implementation, method, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (param.args.length > 3 && param.args[3] != null
+                                    && !Proxy.isProxyClass(param.args[3].getClass())) {
+                                param.args[3] = proxyDtLocationCallback(param.args[3]);
+                            }
+                        }
+                    }).isEmpty()) {
+                        hooked = true;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        if (hooked) {
+            Log.i(TAG, "hook LocationService 回调成功");
+        } else {
+            Log.w(TAG, "未找到 LocationService 回调方法");
+        }
+    }
+
+    private static Object proxyDtLocationCallback(final Object realCallback) {
+        try {
+            Class<?> callback = XposedHelpers.findClass(
+                "com.alibaba.android.rimet.DtLocationCallback",
+                realCallback.getClass().getClassLoader());
+            return Proxy.newProxyInstance(callback.getClassLoader(), new Class<?>[]{callback},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                        if ("onGetLocation".equals(method.getName())
+                                && args != null && args.length > 0 && isEnabled()) {
+                            patchLocation(args[0], true);
+                            clearMockFlags(args[0]);
+                        }
+                        return invokeListener(method, realCallback, args);
+                    }
+                });
+        } catch (Throwable t) {
+            return realCallback;
+        }
+    }
+
+    private static void hookMockFlags(ClassLoader cl) {
+        try {
+            Class<?> amapLocation = XposedHelpers.findClass("com.amap.api.location.AMapLocation", cl);
+            XposedHelpers.findAndHookMethod(amapLocation, "isMock", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (isEnabled()) param.setResult(false);
+                }
+            });
+            XposedHelpers.findAndHookMethod(amapLocation, "setMock", boolean.class, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    if (isEnabled()) param.args[0] = false;
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "hook AMap mock 标记失败: " + t.getMessage());
+        }
+        try {
+            Class<?> location = XposedHelpers.findClass("android.location.Location", cl);
+            XposedHelpers.findAndHookMethod(location, "isFromMockProvider", new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if (isEnabled()) param.setResult(false);
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "hook Location.isFromMockProvider 失败: " + t.getMessage());
+        }
+        try {
+            Class<?> dtLocation = XposedHelpers.findClass(
+                "com.alibaba.android.rimet.model.DtLocation", cl);
+            for (String method : new String[]{"isFromMock", "isFromMockProvider", "isMock"}) {
+                try {
+                    XposedHelpers.findAndHookMethod(dtLocation, method, new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            if (isEnabled()) param.setResult(false);
+                        }
+                    });
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "hook DtLocation mock 标记失败: " + t.getMessage());
+        }
+    }
+
+    private static void clearMockFlags(Object location) {
+        if (location == null) return;
+        try { XposedHelpers.callMethod(location, "setFromMock", false); } catch (Throwable ignored) {}
+        try { XposedHelpers.callMethod(location, "setMock", false); } catch (Throwable ignored) {}
+    }
+
+    // ============================================================
     // Listener 代理
     // ============================================================
     private static Object proxyAMapListener(final Object realListener) {
@@ -247,16 +429,12 @@ public class LocationHook {
                 new Class<?>[]{itf},
                 new InvocationHandler() {
                     @Override
-                    public Object invoke(Object proxy, Method method, Object[] args) {
+                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                         if ("onLocationChanged".equals(method.getName())
                             && args != null && args.length > 0) {
                             patchLocation(args[0], true);
                         }
-                        try {
-                            return method.invoke(realListener, args);
-                        } catch (Throwable t) {
-                            return null;
-                        }
+                        return invokeListener(method, realListener, args);
                     }
                 });
         } catch (Throwable t) {
@@ -264,24 +442,25 @@ public class LocationHook {
         }
     }
 
-    private static Object proxySystemListener(final android.location.LocationListener real) {
-        return Proxy.newProxyInstance(
+    private static android.location.LocationListener wrapSystemListener(
+            final android.location.LocationListener real) {
+        android.location.LocationListener existing = sSystemListenerProxies.get(real);
+        if (existing != null) return existing;
+        android.location.LocationListener proxy = (android.location.LocationListener) Proxy.newProxyInstance(
             real.getClass().getClassLoader(),
             new Class<?>[]{android.location.LocationListener.class},
             new InvocationHandler() {
                 @Override
-                public Object invoke(Object proxy, Method method, Object[] args) {
+                public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                     if ("onLocationChanged".equals(method.getName())
                         && args != null && args.length > 0) {
                         patchLocation(args[0], false);
                     }
-                    try {
-                        return method.invoke(real, args);
-                    } catch (Throwable t) {
-                        return null;
-                    }
+                    return invokeListener(method, real, args);
                 }
             });
+        sSystemListenerProxies.put(real, proxy);
+        return proxy;
     }
 
     // ============================================================
@@ -322,6 +501,14 @@ public class LocationHook {
                 } catch (Throwable ignored) {}
             }
             c = c.getSuperclass();
+        }
+    }
+
+    private static Object invokeListener(Method method, Object listener, Object[] args) throws Throwable {
+        try {
+            return method.invoke(listener, args);
+        } catch (InvocationTargetException e) {
+            throw e.getCause() == null ? e : e.getCause();
         }
     }
 
@@ -407,11 +594,17 @@ public class LocationHook {
             java.io.File f = new java.io.File(PUBLIC_FILE);
             if (f.canRead()) {
                 String content = readFileContent(f);
+                if (content == null) {
+                    Log.w(TAG, "公共定位配置读取失败，保留现有配置");
+                    return m;
+                }
                 sFileLastModified = f.lastModified();
                 sFileContentSnapshot = content;
                 m = parseFileContent(content);
                 Log.i(TAG, "公共定位配置已加载: " + m);
             } else {
+                sFileLastModified = 0L;
+                sFileContentSnapshot = "";
                 Log.w(TAG, PUBLIC_FILE + " 不可读，使用默认坐标");
             }
         } catch (Throwable t) {
@@ -424,11 +617,22 @@ public class LocationHook {
     private static void reloadIfChanged() {
         try {
             java.io.File f = new java.io.File(PUBLIC_FILE);
-            if (!f.canRead()) return;
+            if (!f.canRead()) {
+                if (sFilePrefs != null && !sFilePrefs.isEmpty()) {
+                    sFilePrefs = new java.util.HashMap<>();
+                    sFileLastModified = 0L;
+                    sFileContentSnapshot = "";
+                    sCoordCacheTs = 0L;
+                    sEnabledCacheTs = 0L;
+                    Log.w(TAG, "公共定位配置不可读，已清除旧缓存");
+                }
+                return;
+            }
             // 用 mtime + 内容双保险：mtime 可能因秒级精度在快速连续切换时相同，
             // 因此同时对比内容快照，确保任何变化都能被检测到
             long mtime = f.lastModified();
             String snapshot = readFileContent(f);
+            if (snapshot == null) return;
             if (mtime != sFileLastModified || !snapshot.equals(sFileContentSnapshot)) {
                 sFilePrefs = parseFileContent(snapshot);
                 sFileLastModified = mtime;
@@ -452,14 +656,14 @@ public class LocationHook {
             br.close();
             return sb.toString();
         } catch (Throwable t) {
-            return "";
+            return null;
         }
     }
 
     private static java.util.Map<String, String> parseFileContent(String content) {
         java.util.Map<String, String> m = new java.util.HashMap<>();
         try {
-            for (String line : content.split("\n")) {
+            for (String line : content.split("\\r?\\n")) {
                 int idx = line.indexOf('=');
                 if (idx > 0) m.put(line.substring(0, idx).trim(), line.substring(idx + 1).trim());
             }

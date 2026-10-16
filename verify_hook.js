@@ -1,5 +1,5 @@
 /**
- * Frida 动态验证脚本 — 钉钉 8.3.20 定位链路验证
+ * Frida 动态验证脚本 — 钉钉 9.0.2.2 定位链路验证
  * 
  * 用法：
  *   frida -U -f com.alibaba.android.rimet -l verify_hook.js --no-pause

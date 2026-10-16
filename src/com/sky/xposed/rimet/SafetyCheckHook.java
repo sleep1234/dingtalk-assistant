@@ -42,19 +42,14 @@ public class SafetyCheckHook {
                     // 按方法名字符串推断返回类型，避免 getReturnType() 在 android.jar stub 下不可用
                     String mn = param.method.getName();
 
-                    if (key.equals("ro.debuggable") || key.equals("ro.adb_enabled") || key.equals("ro.allow.mock.location")
-                            || key.contains("adb")) {
-                        // 统一返回「非调试」
-                        setTypedResult(param, 0, false, "0");
-                    } else if (key.equals("ro.secure") || key.equals("ro.adb.secure")) {
-                        setTypedResult(param, 1, true, "1");
-                    } else if (key.equals("init.svc.adbd")) {
-                        // adbd 未运行
-                        setTypedNull(param, "stopped");
-                    } else if (key.equals("sys.usb.state") || key.equals("sys.usb.config")
-                            || key.equals("persist.sys.usb.config")) {
-                        // USB 无调试连接
-                        setTypedNull(param, "none");
+                    String forcedValue = SafetyCheckPolicy.valueFor(key);
+                    if (forcedValue == null) return;
+                    if ("stopped".equals(forcedValue) || "none".equals(forcedValue)) {
+                        setTypedNull(param, forcedValue);
+                    } else if ("1".equals(forcedValue)) {
+                        setTypedResult(param, 1, true, forcedValue);
+                    } else {
+                        setTypedResult(param, 0, false, forcedValue);
                     }
                 }
 

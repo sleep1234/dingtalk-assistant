@@ -14,6 +14,8 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
@@ -73,6 +75,12 @@ public class SettingsActivity extends Activity
     private android.widget.ListView mListView;
     private android.widget.BaseAdapter mListAdapter;
     private String mCurAddr = "";   // 逆编码得到的当前地址
+    private final Handler mMainHandler = new Handler(Looper.getMainLooper());
+    private volatile int mRegeoSequence;
+    private volatile HttpURLConnection mRegeoConnection;
+    private LocationManager mPendingLocationManager;
+    private LocationListener mPendingLocationListener;
+    private Runnable mPendingLocationTimeout;
 
     double mLat = 28.6557, mLng = 121.4200;
     String mAddr = "";
@@ -240,12 +248,19 @@ public class SettingsActivity extends Activity
 
         final Switch sw = new Switch(this);
         sw.setChecked(isSwitchOn());
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+        final CompoundButton.OnCheckedChangeListener switchListener = new CompoundButton.OnCheckedChangeListener() {
             public void onCheckedChanged(CompoundButton b, boolean on) {
-                setSwitchOn(on);
-                toast("虚拟定位已" + (on ? "开启" : "关闭"));
+                if (setSwitchOn(on)) {
+                    toast("虚拟定位已" + (on ? "开启" : "关闭"));
+                } else {
+                    b.setOnCheckedChangeListener(null);
+                    b.setChecked(!on);
+                    b.setOnCheckedChangeListener(this);
+                    toast("开关保存失败，请确认 root 权限和公共配置文件可写");
+                }
             }
-        });
+        };
+        sw.setOnCheckedChangeListener(switchListener);
         switchCard.addView(sw);
 
         // --- 位置列表标题 ---
@@ -381,6 +396,11 @@ public class SettingsActivity extends Activity
 
     /** 逆编码查询当前坐标的地址（HTTP 方式，绕过签名校验） */
     private void doRegeocode(final double lat, final double lng) {
+        final int requestId = ++mRegeoSequence;
+        mCurAddr = "";
+        updateText();
+        HttpURLConnection oldConnection = mRegeoConnection;
+        if (oldConnection != null) oldConnection.disconnect();
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -391,6 +411,7 @@ public class SettingsActivity extends Activity
                         + "&location=" + URLEncoder.encode(location, "UTF-8")
                         + "&output=json&radius=1000&extensions=base";
                     conn = (HttpURLConnection) new URL(url).openConnection();
+                    mRegeoConnection = conn;
                     conn.setRequestMethod("GET");
                     conn.setConnectTimeout(8000);
                     conn.setReadTimeout(8000);
@@ -408,10 +429,14 @@ public class SettingsActivity extends Activity
                         if (regeo != null) {
                             String addr = regeo.optString("formatted_address");
                             if (addr != null && !addr.isEmpty()) {
-                                mCurAddr = addr;
                                 Log.i(TAG, "逆编码地址: " + addr);
+                                final String resolvedAddress = addr;
                                 runOnUiThread(new Runnable() {
-                                    @Override public void run() { updateText(); }
+                                    @Override public void run() {
+                                        if (requestId != mRegeoSequence) return;
+                                        mCurAddr = resolvedAddress;
+                                        updateText();
+                                    }
                                 });
                             }
                         }
@@ -422,6 +447,7 @@ public class SettingsActivity extends Activity
                     Log.w(TAG, "逆编码异常: " + t.getMessage());
                 } finally {
                     if (conn != null) conn.disconnect();
+                    if (mRegeoConnection == conn) mRegeoConnection = null;
                 }
             }
         }).start();
@@ -436,6 +462,7 @@ public class SettingsActivity extends Activity
         try {
             LocationManager lm = (LocationManager) getSystemService(LOCATION_SERVICE);
             if (lm == null) { toast("无法获取定位服务"); return; }
+            cancelPendingLocation();
             Location last = null;
             try { last = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER); } catch (Throwable ignored) {}
             if (last == null)
@@ -444,17 +471,55 @@ public class SettingsActivity extends Activity
                 double[] g = wgs84ToGcj02(last.getLatitude(), last.getLongitude());
                 moveMap(g[0], g[1]); return;
             }
-            final boolean[] done = {false};
-            lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000, 1f, new LocationListener() {
+            final LocationManager manager = lm;
+            final String provider;
+            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                provider = LocationManager.NETWORK_PROVIDER;
+            } else if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                provider = LocationManager.GPS_PROVIDER;
+            } else {
+                toast("网络和 GPS 定位均未开启");
+                return;
+            }
+            final LocationListener[] listenerHolder = new LocationListener[1];
+            final LocationListener listener = new LocationListener() {
                 public void onLocationChanged(Location l) {
-                    if (!done[0]) { done[0] = true; double[] g = wgs84ToGcj02(l.getLatitude(), l.getLongitude()); moveMap(g[0], g[1]); }
+                    if (listenerHolder[0] != mPendingLocationListener) return;
+                    cancelPendingLocation();
+                    double[] g = wgs84ToGcj02(l.getLatitude(), l.getLongitude());
+                    moveMap(g[0], g[1]);
                 }
                 public void onStatusChanged(String p, int s, Bundle b) {}
                 public void onProviderEnabled(String p) {}
                 public void onProviderDisabled(String p) {}
-            });
+            };
+            listenerHolder[0] = listener;
+            mPendingLocationManager = manager;
+            mPendingLocationListener = listener;
+            mPendingLocationTimeout = new Runnable() {
+                @Override public void run() {
+                    if (listener == mPendingLocationListener) {
+                        cancelPendingLocation();
+                        toast("定位超时");
+                    }
+                }
+            };
+            manager.requestSingleUpdate(provider, listener, Looper.getMainLooper());
+            mMainHandler.postDelayed(mPendingLocationTimeout, 10000L);
             toast("正在定位…");
         } catch (Throwable t) { toast("定位失败: " + t.getMessage()); }
+    }
+
+    private void cancelPendingLocation() {
+        if (mPendingLocationTimeout != null) {
+            mMainHandler.removeCallbacks(mPendingLocationTimeout);
+        }
+        if (mPendingLocationManager != null && mPendingLocationListener != null) {
+            try { mPendingLocationManager.removeUpdates(mPendingLocationListener); } catch (Throwable ignored) {}
+        }
+        mPendingLocationManager = null;
+        mPendingLocationListener = null;
+        mPendingLocationTimeout = null;
     }
 
     void moveMap(double gcjLat, double gcjLng) {
@@ -507,17 +572,23 @@ public class SettingsActivity extends Activity
         double[] wgs = gcj02ToWgs84(mLat, mLng);
 
         // 写公共定位文件 /data/local/tmp/rimet_location.txt（通过 root，避開 Scoped Storage）
-        writePublicFile(wgs, mLat, mLng, name);
+        if (!writePublicFile(wgs, mLat, mLng, name)) {
+            toast("保存失败：公共定位文件不可写");
+            return;
+        }
 
         // 也写 SharedPreferences（如果生效的话），fixPrefsPermission 尝试修权限
         try {
-            mPrefs.edit()
+            boolean committed = mPrefs.edit()
                 .putFloat("lat", (float) wgs[0])
                 .putFloat("lng", (float) wgs[1])
                 .putFloat("lat_gcj", (float) mLat)
                 .putFloat("lng_gcj", (float) mLng)
                 .putString("addr", name)
                 .commit();
+            if (!committed) {
+                Log.w(TAG, "SharedPreferences 提交失败，继续使用公共定位文件");
+            }
             fixPrefsPermission();
         } catch (Throwable t) {
             Log.e(TAG, "prefs 写入失败", t);
@@ -534,22 +605,60 @@ public class SettingsActivity extends Activity
      * 通过 root 写 /data/local/tmp/rimet_location.txt，钉钉 LocationHook 直接读取。
      * enabled 键保留文件中原有的值（不覆盖），若文件不存在则默认 enabled=1。
      */
-    private void writePublicFile(double[] wgs, double gcjLat, double gcjLng, String addr) {
+    private boolean writePublicFile(double[] wgs, double gcjLat, double gcjLng, String addr) {
         try {
-            // 先尝试用 sed 原地更新已有的坐标行（不覆盖 enabled）
-            String sedLatGcj = "sed -i '/^lat_gcj=/c\\lat_gcj=" + gcjLat + "' " + PUBLIC_FILE;
-            String sedLngGcj = "sed -i '/^lng_gcj=/c\\lng_gcj=" + gcjLng + "' " + PUBLIC_FILE;
-            String sedLat = "sed -i '/^lat=/c\\lat=" + (float) wgs[0] + "' " + PUBLIC_FILE;
-            String sedLng = "sed -i '/^lng=/c\\lng=" + (float) wgs[1] + "' " + PUBLIC_FILE;
-            String sedAddr = "sed -i '/^addr=/c\\addr=" + addr + "' " + PUBLIC_FILE;
-            String cmd = "if [ ! -f " + PUBLIC_FILE + " ]; then echo enabled=1 > " + PUBLIC_FILE + "; fi" 
-                + "; " + sedLatGcj + "; " + sedLngGcj + "; " + sedLat + "; " + sedLng + "; " + sedAddr;
-            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
-            p.waitFor();
+            String existing = readPublicFile();
+            if (existing == null) {
+                throw new IllegalStateException("公共定位文件读取失败，拒绝覆盖现有配置");
+            }
+            String content = LocationConfig.render(existing, wgs[0], wgs[1], gcjLat, gcjLng, addr);
+            writePublicConfig(content);
+            if (!new java.io.File(PUBLIC_FILE).canRead()) {
+                throw new IllegalStateException("公共定位文件写入后不可读");
+            }
             Log.i(TAG, "公共定位文件已写入: " + PUBLIC_FILE);
+            return true;
         } catch (Throwable t) {
             Log.e(TAG, "写入公共定位文件失败", t);
+            return false;
         }
+    }
+
+    private String readPublicFile() {
+        java.io.File file = new java.io.File(PUBLIC_FILE);
+        if (!file.exists()) return "";
+        if (!file.canRead()) return null;
+        try {
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(new java.io.FileInputStream(file), "UTF-8"));
+            StringBuilder content = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line).append('\n');
+            }
+            reader.close();
+            return content.toString();
+        } catch (Throwable t) {
+            Log.w(TAG, "读取公共定位文件失败: " + t.getMessage());
+            return null;
+        }
+    }
+
+    private void writePublicConfig(String content) throws Exception {
+        String tempFile = PUBLIC_FILE + ".tmp." + android.os.Process.myPid();
+        String cmd = "printf '%s' " + shellQuote(content)
+            + " > " + shellQuote(tempFile)
+            + " && chmod 644 " + shellQuote(tempFile)
+            + " && mv -f " + shellQuote(tempFile) + " " + shellQuote(PUBLIC_FILE);
+        Process process = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new IllegalStateException("su 写入公共定位文件失败，exit=" + exitCode);
+        }
+    }
+
+    private String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
     }
 
     private static final String PUBLIC_FILE = "/data/local/tmp/rimet_location.txt";
@@ -622,20 +731,25 @@ public class SettingsActivity extends Activity
     void switchTo(int idx) {
         if (idx < 0 || idx >= mLocList.size()) return;
         final LocItem it = mLocList.get(idx);
-        moveMap(it.lat, it.lng);
-        mAddr = it.addr;
         // 写入激活坐标到 SharedPreferences（LSPosed 自动共享，钉钉实时生效）
         double[] wgs = gcj02ToWgs84(it.lat, it.lng);
-        mPrefs.edit()
+        if (!writePublicFile(wgs, it.lat, it.lng, it.addr)) {
+            toast("切换失败：公共定位文件不可写");
+            return;
+        }
+        boolean committed = mPrefs.edit()
             .putFloat("lat", (float) wgs[0])
             .putFloat("lng", (float) wgs[1])
             .putFloat("lat_gcj", (float) it.lat)
             .putFloat("lng_gcj", (float) it.lng)
             .putString("addr", it.addr)
             .commit();
+        if (!committed) {
+            Log.w(TAG, "SharedPreferences 提交失败，继续使用公共定位文件");
+        }
         fixPrefsPermission();
-        // 同步写公共文件（钉钉 LocationHook 第一优先级读取通道）
-        writePublicFile(wgs, it.lat, it.lng, it.addr);
+        moveMap(it.lat, it.lng);
+        mAddr = it.addr;
         updateText();
         toast("已切换到: " + it.addr);
     }
@@ -665,7 +779,11 @@ public class SettingsActivity extends Activity
 
     // ====== 开关 ======
     boolean isSwitchOn() {
-        // 从 SharedPreferences 读开关（LocationHook 同源读取）
+        // 公共文件是跨进程真值源，SharedPreferences 只作为兼容回退。
+        String publicConfig = readPublicFile();
+        if (publicConfig != null && publicConfig.indexOf("enabled=") >= 0) {
+            return LocationConfig.enabledFrom(publicConfig, true);
+        }
         try {
             if (mPrefs.contains("enabled")) {
                 try {
@@ -679,15 +797,23 @@ public class SettingsActivity extends Activity
         return true;  // 默认开启
     }
 
-    void setSwitchOn(final boolean on) {
-        mPrefs.edit().putBoolean("enabled", on).commit();
-        fixPrefsPermission();
+    boolean setSwitchOn(final boolean on) {
         // 更新公共文件的 enabled 键（钉钉 LocationHook 读取此键控制开关）
         try {
-            Process p = Runtime.getRuntime().exec(
-                new String[]{"su", "-c", "sed -i 's/^enabled=.*/enabled=" + (on ? "1" : "0") + "/' " + PUBLIC_FILE});
-            p.waitFor();
-        } catch (Throwable ignored) {}
+            String existing = readPublicFile();
+            if (existing == null) {
+                Log.e(TAG, "读取公共定位配置失败，拒绝覆盖坐标");
+                return false;
+            }
+            writePublicConfig(LocationConfig.setEnabled(existing, on));
+        } catch (Throwable t) {
+            Log.e(TAG, "写入开关失败", t);
+            return false;
+        }
+        boolean committed = mPrefs.edit().putBoolean("enabled", on).commit();
+        if (!committed) Log.w(TAG, "SharedPreferences 开关提交失败，公共配置仍已生效");
+        fixPrefsPermission();
+        return true;
     }
 
     // ====== 坐标系转换 ======
@@ -803,6 +929,13 @@ public class SettingsActivity extends Activity
 
     @Override protected void onResume() { super.onResume(); mMapView.onResume(); }
     @Override protected void onPause() { super.onPause(); mMapView.onPause(); }
-    @Override protected void onDestroy() { super.onDestroy(); mMapView.onDestroy(); }
+    @Override protected void onDestroy() {
+        ++mRegeoSequence;
+        HttpURLConnection conn = mRegeoConnection;
+        if (conn != null) conn.disconnect();
+        cancelPendingLocation();
+        super.onDestroy();
+        mMapView.onDestroy();
+    }
     @Override protected void onSaveInstanceState(Bundle st) { super.onSaveInstanceState(st); mMapView.onSaveInstanceState(st); }
 }

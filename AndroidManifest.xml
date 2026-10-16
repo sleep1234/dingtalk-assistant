@@ -29,8 +29,8 @@
         <provider
             android:name=".LocProvider"
             android:authorities="com.sky.xposed.rimet.loc"
-            android:exported="true"
-            android:grantUriPermissions="true"/>
+            android:exported="false"
+            android:grantUriPermissions="false"/>
 
         <activity
             android:name=".SettingsActivity"
